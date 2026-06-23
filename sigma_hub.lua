@@ -28,7 +28,7 @@ local CollectionService = game:GetService("CollectionService")
 local RS = game:GetService("ReplicatedStorage")
 local plr = Players.LocalPlayer
 
-local SIGMA_VERSION = "2026.06.23-fruit2"
+local SIGMA_VERSION = "2026.06.23-ascend3"
 
 local LOOP_DELAY = 0.1
 local BUYS_PER_TICK = 8
@@ -128,6 +128,7 @@ local Farm = {
 	lastAscendAttemptAt = 0,
 	lastAscendNoTycoonLogAt = 0,
 	lastAscendProgressLogAt = 0,
+	knownTotalAscensions = nil,
 	lastUpgradeLogAt = 0,
 	phoneConns = {},
 }
@@ -242,6 +243,8 @@ local function readStats()
 		totalRebirths = "N/A",
 		evolution = "N/A",
 		totalEvolves = "N/A",
+		ascensions = "N/A",
+		totalAscensions = "N/A",
 	}
 
 	local ok = pcall(function()
@@ -256,6 +259,8 @@ local function readStats()
 		local tb = comp(t, "Balances")
 		local tr = comp(t, "Rebirth")
 		local te = comp(t, "Evolution")
+		local ta = comp(t, "Ascension")
+		local ca = comp(t, "ClientAscension")
 		local cb = comp(t, "ClientBalances") or tb
 
 		if cb then
@@ -305,6 +310,16 @@ local function readStats()
 			end)
 			stats.totalEvolves = teOk and tostring(total) or "N/A"
 		end
+
+		if ta or ca then
+			local total, current = readAscensionCounts(ta, ca)
+			if current ~= nil then
+				stats.ascensions = tostring(current)
+			end
+			if total ~= nil then
+				stats.totalAscensions = tostring(total)
+			end
+		end
 	end)
 
 	if not ok then
@@ -312,6 +327,61 @@ local function readStats()
 	end
 
 	return stats
+end
+
+local function callComponentNumber(compObj, methodName)
+	if not (compObj and compObj[methodName]) then
+		return nil
+	end
+	local ok, result = pcall(function()
+		return compObj[methodName](compObj)
+	end)
+	if ok and type(result) == "number" then
+		return result
+	end
+	return nil
+end
+
+local function readAscensionCounts(ta, ca)
+	for _, name in ipairs({ "GetTotalAscensions", "GetTotalAscends", "GetTotalAscension" }) do
+		local total = callComponentNumber(ta, name) or callComponentNumber(ca, name)
+		if total ~= nil then
+			Farm.knownTotalAscensions = math.max(Farm.knownTotalAscensions or 0, total)
+			local current = callComponentNumber(ta, "GetAscension") or callComponentNumber(ca, "GetAscension")
+			return total, current
+		end
+	end
+
+	for _, attr in ipairs({ "TotalAscensions", "Ascensions", "Ascension" }) do
+		local attrVal = plr:GetAttribute(attr)
+		if type(attrVal) == "number" then
+			Farm.knownTotalAscensions = math.max(Farm.knownTotalAscensions or 0, attrVal)
+			local current = callComponentNumber(ta, "GetAscension") or callComponentNumber(ca, "GetAscension")
+			return attrVal, current
+		end
+	end
+
+	local inst = getTycoonInstance()
+	if inst then
+		for _, valueName in ipairs({ "TotalAscensions", "Ascensions", "Ascension" }) do
+			local valueObj = inst:FindFirstChild(valueName, true)
+			if valueObj and valueObj:IsA("NumberValue") then
+				local total = valueObj.Value
+				Farm.knownTotalAscensions = math.max(Farm.knownTotalAscensions or 0, total)
+				local current = callComponentNumber(ta, "GetAscension") or callComponentNumber(ca, "GetAscension")
+				return total, current
+			end
+		end
+	end
+
+	local current = callComponentNumber(ta, "GetAscension") or callComponentNumber(ca, "GetAscension")
+	if Farm.knownTotalAscensions ~= nil then
+		return Farm.knownTotalAscensions, current
+	end
+	if current ~= nil then
+		return current, current
+	end
+	return nil, nil
 end
 
 local function readAscensionStats()
@@ -333,19 +403,17 @@ local function readAscensionStats()
 			local ok, progress = pcall(function()
 				return ca:GetAscensionProgress()
 			end)
-			if ok and progress then
+			if ok and progress ~= nil then
 				out.progress = progress
 				out.progressText = string.format("%.0f%%", progress * 100)
 				out.ready = progress >= 1
 			end
 		end
-		if ta then
-			local ok, level = pcall(function()
-				return ta:GetAscension()
-			end)
-			if ok and level ~= nil then
-				out.level = tostring(level)
-			end
+		local total, current = readAscensionCounts(ta, ca)
+		if total ~= nil then
+			out.level = tostring(total)
+		elseif current ~= nil then
+			out.level = tostring(current)
 		end
 	end)
 	return out
@@ -1841,7 +1909,7 @@ local function tryAutoAscend()
 	local okProg, progress = pcall(function()
 		return ca:GetAscensionProgress()
 	end)
-	if not (okProg and progress) then
+	if not (okProg and progress ~= nil) then
 		log("Ascend check: could not read ascension progress")
 		return
 	end
@@ -1864,12 +1932,10 @@ local function tryAutoAscend()
 	end
 	Farm.lastAscendAttemptAt = now
 
-	local beforeAscension
-	if ta then
-		pcall(function()
-			beforeAscension = ta:GetAscension()
-		end)
-	end
+	local beforeTotal
+	pcall(function()
+		beforeTotal = readAscensionCounts(ta, ca)
+	end)
 
 	log("Ascend: invoking (all upgrades purchased)")
 	local ok, result = pcall(function()
@@ -1880,24 +1946,32 @@ local function tryAutoAscend()
 		return
 	end
 
-	if result then
-		log("Ascend success")
+	task.wait(0.35)
+
+	local afterTotal
+	pcall(function()
+		afterTotal = readAscensionCounts(ta, ca)
+	end)
+
+	local ascended = result == true
+		or (beforeTotal and afterTotal and afterTotal > beforeTotal)
+	if ascended then
+		if afterTotal then
+			Farm.knownTotalAscensions = afterTotal
+		elseif Farm.knownTotalAscensions then
+			Farm.knownTotalAscensions += 1
+		else
+			Farm.knownTotalAscensions = 1
+		end
+		log("Ascend success (total " .. tostring(Farm.knownTotalAscensions) .. ")")
 		setStatus("Ascended!")
+		if Farm.autoComplete then
+			markRebirthKickstart(nil)
+		end
 		return
 	end
 
-	local afterAscension
-	if ta then
-		pcall(function()
-			afterAscension = ta:GetAscension()
-		end)
-	end
-	if beforeAscension and afterAscension and afterAscension > beforeAscension then
-		log("Ascend success (level " .. tostring(afterAscension) .. ")")
-		setStatus("Ascended!")
-	else
-		log("Ascend declined by server (returned " .. tostring(result) .. ")")
-	end
+	log("Ascend declined by server (returned " .. tostring(result) .. ")")
 end
 
 local function tryAutoComplete()
@@ -2048,6 +2122,10 @@ local Trade = {
 	lastPrice = nil,
 	lastWaitLogAt = 0,
 	lastSessionEndLogAt = 0,
+	lastNewsScanAt = 0,
+	cachedNews = nil,
+	positionLockUntil = 0,
+	tickAccum = 0,
 	trend = 0,
 	rises = 0,
 	falls = 0,
@@ -2055,21 +2133,26 @@ local Trade = {
 	trough = nil,
 	sessionActive = false,
 	sessionStartAt = 0,
-	COOLDOWN = 2.0,
-	POST_SELL_BUY_WAIT = 3.0,
-	WAIT_LOG = 3.0,
-	BUF = 32,
+	COOLDOWN = 1.35,
+	ENDGAME_COOLDOWN = 0.35,
+	POST_SELL_BUY_WAIT = 2.0,
+	WAIT_LOG = 4.0,
+	TICK_INTERVAL = 0.12,
+	NEWS_REFRESH = 0.28,
+	POSITION_LOCK = 0.7,
+	BUF = 24,
 	RISE_MIN = 3,
-	CRASH = 0.08,
+	CRASH = 0.07,
 	MA = 5,
 	NET_THRESHOLD = 1.0,
 	NEUTRAL_BAND = 1.0,
 	LATEST_BOOST = 3.0,
-	ENDGAME_ELAPSED = 50,
-	ENDGAME_LINE_T = 52,
-	ENDGAME_COOLDOWN = 0.45,
-	FORCE_SELL_DROP = 0.04,
-	FORCE_SELL_PEAK_DROP = 0.06,
+	ENDGAME_ELAPSED = 42,
+	ENDGAME_LINE_T = 48,
+	CRITICAL_ELAPSED = 52,
+	CRITICAL_LINE_T = 55,
+	FORCE_SELL_DROP = 0.035,
+	FORCE_SELL_PEAK_DROP = 0.05,
 }
 
 local function resetTradeSessionState()
@@ -2087,6 +2170,10 @@ local function resetTradeSessionState()
 	Trade.trough = nil
 	Trade.sessionActive = false
 	Trade.sessionStartAt = 0
+	Trade.lastNewsScanAt = 0
+	Trade.cachedNews = nil
+	Trade.positionLockUntil = 0
+	Trade.tickAccum = 0
 end
 
 local function stopTradeHelper()
@@ -2098,7 +2185,60 @@ local function stopTradeHelper()
 end
 
 local function isHoldingCrypto(ui)
-	return ui.Gui.Main.Balances.Status.Text == "IN"
+	local status = ui.Gui.Main.Balances.Status
+	if status and status.Text == "IN" then
+		return true
+	end
+	if status and status.Text == "OUT" then
+		return false
+	end
+	local cash = ui._CashVal and ui._CashVal.Value or 0
+	local crypto = ui._CryptoVal and ui._CryptoVal.Value or 0
+	return crypto > cash
+end
+
+local function getTradeButtonIntent(ui)
+	local btn = ui._TradeButton and ui._TradeButton.Gui
+	if not btn then
+		return nil
+	end
+	local title = string.upper(btn.Title.Text or "")
+	if string.find(title, "SELL", 1, true) then
+		return "sell"
+	end
+	if string.find(title, "BUY", 1, true) then
+		return "buy"
+	end
+	return nil
+end
+
+local function getTradeSessionPhase(ui)
+	local elapsed, lineT = getTradeTiming(ui)
+	local ending = (elapsed and elapsed >= Trade.ENDGAME_ELAPSED)
+		or (lineT and lineT >= Trade.ENDGAME_LINE_T)
+	local critical = (elapsed and elapsed >= Trade.CRITICAL_ELAPSED)
+		or (lineT and lineT >= Trade.CRITICAL_LINE_T)
+	return elapsed, lineT, ending, critical
+end
+
+local function getCachedNews(ui, now)
+	if Trade.cachedNews and now - Trade.lastNewsScanAt < Trade.NEWS_REFRESH then
+		return Trade.cachedNews
+	end
+	Trade.cachedNews = analyzeNewsSentiment(ui)
+	Trade.lastNewsScanAt = now
+	return Trade.cachedNews
+end
+
+local function getTradePosition(ui)
+	local intent = getTradeButtonIntent(ui)
+	if intent == "sell" then
+		return true
+	end
+	if intent == "buy" then
+		return false
+	end
+	return isHoldingCrypto(ui)
 end
 
 local function classifyNewsColor(color)
@@ -2319,16 +2459,18 @@ local function isAtMaxEarnings(ui)
 	return ok2 and capped
 end
 
-local function shouldForceEndgameSell(ui, price, px)
-	if not isHoldingCrypto(ui) then
+local function shouldForceEndgameSell(ui, price, px, sessionEnding, sessionCritical)
+	if not getTradePosition(ui) then
 		return false, nil
+	end
+	if sessionCritical then
+		return true, "critical — must exit position"
+	end
+	if sessionEnding then
+		return true, "session ending — take profits"
 	end
 	if isAtMaxEarnings(ui) then
 		return true, "max earnings reached"
-	end
-	local elapsed, lineT = getTradeTiming(ui)
-	if elapsed and (elapsed >= Trade.ENDGAME_ELAPSED or (lineT and lineT >= Trade.ENDGAME_LINE_T)) then
-		return true, "session ending"
 	end
 	if price <= 0.05 then
 		return true, "price near zero"
@@ -2339,10 +2481,113 @@ local function shouldForceEndgameSell(ui, price, px)
 	if px.dropFromPositionPeak >= Trade.FORCE_SELL_PEAK_DROP then
 		return true, string.format("position peak drop %.0f%%", px.dropFromPositionPeak * 100)
 	end
-	if px.fallingHard and px.recentDropPct >= 0.025 then
+	if px.fallingHard and px.recentDropPct >= 0.02 then
 		return true, "hard fall"
 	end
+	if px.atLocalPeak then
+		return true, "local peak"
+	end
 	return false, nil
+end
+
+local function decideSellAction(news, px, forceSell, forceReason, sessionCritical)
+	if forceSell then
+		return true, forceReason or "protect position"
+	end
+	if sessionCritical then
+		return true, "critical exit"
+	end
+	if news.latestUrgentBear or (news.latestBearish and news.redBreaking) then
+		return true, "urgent bear headline"
+	end
+	if news.latestBearish then
+		return true, "latest bearish"
+	end
+	if news.bearScore > news.bullScore + 0.5 then
+		return true, "net bearish"
+	end
+	if px.sharpCrash then
+		return true, "sharp crash"
+	end
+	if px.fallingHard and px.recentDropPct >= 0.025 then
+		return true, "falling price"
+	end
+	if px.atLocalPeak and px.falls >= 1 then
+		return true, "local peak turn"
+	end
+	return false, nil
+end
+
+local function decideBuyAction(news, px, now, sessionEnding, sessionCritical)
+	if sessionEnding or sessionCritical then
+		return false, nil
+	end
+	local postSellBlock = Trade.lastSellAt > 0
+		and now - Trade.lastSellAt < Trade.POST_SELL_BUY_WAIT
+	if postSellBlock then
+		return false, nil
+	end
+	if news.latestBearish or news.latestUrgentBear or news.majorityBearish then
+		return false, nil
+	end
+	if px.atLocalPeak and not news.latestBullish then
+		return false, nil
+	end
+	if news.bullScore > news.bearScore + Trade.NET_THRESHOLD and news.latestBullish then
+		return true, "bullish news + green latest"
+	end
+	if news.latestBullish and news.greenBreaking and news.bullScore >= news.bearScore then
+		return true, "green breaking"
+	end
+	if news.newsNeutral and px.risingHard and px.belowMA and news.bullScore > 0 then
+		return true, "neutral rise at/below MA"
+	end
+	if news.newsNeutral and px.atLocalBottom and px.momentum > 0 then
+		return true, "local bottom"
+	end
+	return false, nil
+end
+
+local function executeTradeAction(ui, now, action, reason, news, holding, price)
+	if now < Trade.positionLockUntil then
+		return false
+	end
+	local intent = getTradeButtonIntent(ui)
+	if action == "sell" and intent ~= "sell" then
+		return false
+	end
+	if action == "buy" and intent ~= "buy" then
+		return false
+	end
+	local ok = pcall(function()
+		ui:Trade()
+	end)
+	if not ok then
+		return false
+	end
+	Trade.lastAt = now
+	Trade.positionLockUntil = now + Trade.POSITION_LOCK
+	if action == "buy" then
+		Trade.lastBuyAt = now
+		Trade.peak = price
+		Trade.trough = nil
+	else
+		Trade.lastBuyAt = 0
+		Trade.lastSellAt = now
+		Trade.trough = price
+		Trade.peak = nil
+	end
+	Trade.trend = 0
+	Trade.rises = 0
+	Trade.falls = 0
+	log(string.format(
+		"Trade: %s because [%s] bull %.1f bear %.1f",
+		string.upper(action),
+		reason,
+		news.bullScore,
+		news.bearScore
+	))
+	return true
 end
 
 local function getPriceContext(price)
@@ -2425,7 +2670,13 @@ local function startTradeHelper()
 		return
 	end
 
-	Trade.helperConn = RunService.Heartbeat:Connect(function()
+	Trade.helperConn = RunService.Heartbeat:Connect(function(dt)
+		Trade.tickAccum += dt
+		if Trade.tickAccum < Trade.TICK_INTERVAL then
+			return
+		end
+		Trade.tickAccum = 0
+
 		local ok, ui = pcall(function()
 			return M.UIMinigameTrade:get()
 		end)
@@ -2439,16 +2690,20 @@ local function startTradeHelper()
 
 		if not lineRunning then
 			if Trade.sessionActive then
-				if isHoldingCrypto(ui) then
-					local now = os.clock()
-					if now - Trade.lastSessionEndLogAt >= 2 then
-						Trade.lastSessionEndLogAt = now
-						log("Trade: line stopped while still IN — missed sell window")
-					end
-				else
-					local now = os.clock()
-					if now - Trade.lastSessionEndLogAt >= 2 then
-						Trade.lastSessionEndLogAt = now
+				if getTradePosition(ui) and canTrade and os.clock() >= Trade.positionLockUntil then
+					pcall(function()
+						if getTradeButtonIntent(ui) == "sell" then
+							ui:Trade()
+							log("Trade: emergency sell at line stop")
+						end
+					end)
+				end
+				local now = os.clock()
+				if now - Trade.lastSessionEndLogAt >= 2 then
+					Trade.lastSessionEndLogAt = now
+					if getTradePosition(ui) then
+						log("Trade: line stopped while still IN")
+					else
 						log("Trade: session ended (line stopped)")
 					end
 				end
@@ -2464,7 +2719,7 @@ local function startTradeHelper()
 		end
 
 		local now = os.clock()
-		local holdingCrypto = isHoldingCrypto(ui)
+		local holdingCrypto = getTradePosition(ui)
 
 		if holdingCrypto then
 			Trade.peak = Trade.peak and math.max(Trade.peak, price) or price
@@ -2489,126 +2744,46 @@ local function startTradeHelper()
 		Trade.lastPrice = price
 		Trade.rises, Trade.falls = countConsecutiveMoves(Trade.prices)
 
-		local news = analyzeNewsSentiment(ui)
+		local _, _, sessionEnding, sessionCritical = getTradeSessionPhase(ui)
+		local news = getCachedNews(ui, now)
 		local px = getPriceContext(price)
-		local elapsed, lineT = getTradeTiming(ui)
-		local sessionEnding = (elapsed and elapsed >= Trade.ENDGAME_ELAPSED)
-			or (lineT and lineT >= Trade.ENDGAME_LINE_T)
-		local forceSell, forceReason = shouldForceEndgameSell(ui, price, px)
-		local cooldown = (forceSell or sessionEnding) and Trade.ENDGAME_COOLDOWN or Trade.COOLDOWN
+		local forceSell, forceReason = shouldForceEndgameSell(ui, price, px, sessionEnding, sessionCritical)
+		local cooldown = (forceSell or sessionCritical) and Trade.ENDGAME_COOLDOWN or Trade.COOLDOWN
 
-		if not canTrade and not forceSell then
-			if now - Trade.lastWaitLogAt >= Trade.WAIT_LOG then
-				Trade.lastWaitLogAt = now
-				log(string.format(
-					"Trade: waiting (button inactive) — trend %d rises %d falls %d",
-					Trade.trend,
-					Trade.rises,
-					Trade.falls
-				))
-			end
+		if not canTrade and not (forceSell and holdingCrypto) then
 			return
 		end
-
 		if now - Trade.lastAt < cooldown then
 			return
 		end
 
-		local shouldTrade = false
-		local reason = nil
-		local latestLabel = news.latestHeader or "no headline"
-
-		if forceSell then
-			shouldTrade = true
-			reason = "endgame — " .. forceReason
-		elseif holdingCrypto then
-			if news.latestUrgentBear or (news.latestBearish and news.redBreaking) then
-				shouldTrade = true
-				reason = string.format("urgent bear headline [%s]", latestLabel)
-			elseif news.latestBearish then
-				shouldTrade = true
-				reason = string.format("latest headline bearish [%s]", latestLabel)
-			elseif news.bearScore > news.bullScore then
-				shouldTrade = true
-				reason = string.format("net bearish [%s]", latestLabel)
-			elseif px.sharpCrash and news.bearScore > 0 then
-				shouldTrade = true
-				reason = string.format("crash + bearish news [%s]", latestLabel)
-			elseif news.newsNeutral and px.sharpCrash and px.fallingHard then
-				shouldTrade = true
-				reason = string.format("neutral news tiebreaker — crash [%s]", latestLabel)
+		local action, reason
+		if holdingCrypto then
+			local shouldSell
+			shouldSell, reason = decideSellAction(news, px, forceSell, forceReason, sessionCritical)
+			if shouldSell then
+				action = "sell"
 			end
 		else
-			local postSellBlock = Trade.lastSellAt > 0
-				and now - Trade.lastSellAt < Trade.POST_SELL_BUY_WAIT
-				and not (news.latestBullish and news.bullScore > news.bearScore + Trade.NET_THRESHOLD)
-
-			if sessionEnding then
-				shouldTrade = false
-			elseif postSellBlock then
-				shouldTrade = false
-			elseif news.latestBearish or news.latestUrgentBear then
-				shouldTrade = false
-			elseif news.majorityBearish then
-				shouldTrade = false
-			elseif news.bullScore > news.bearScore + Trade.NET_THRESHOLD and news.latestBullish then
-				if news.redBreaking and not news.latestBullish then
-					shouldTrade = false
-				else
-					shouldTrade = true
-					reason = string.format("net bullish + green latest [%s]", latestLabel)
-				end
-			elseif news.latestBullish and news.greenBreaking and news.bullScore >= news.bearScore then
-				shouldTrade = true
-				reason = string.format("green BREAKING latest [%s]", latestLabel)
-			elseif news.newsNeutral and px.risingHard and news.bullScore > 0 then
-				shouldTrade = true
-				reason = string.format("neutral news tiebreaker — rise + bull news [%s]", latestLabel)
-			elseif news.newsNeutral and px.sharpCrash == false and px.momentum > 0.005 and news.latestBullish then
-				shouldTrade = true
-				reason = string.format("neutral news tiebreaker — momentum + green latest [%s]", latestLabel)
+			local shouldBuy
+			shouldBuy, reason = decideBuyAction(news, px, now, sessionEnding, sessionCritical)
+			if shouldBuy then
+				action = "buy"
 			end
 		end
 
-		if shouldTrade then
-			local action = holdingCrypto and "SELL" or "BUY"
-			log(string.format(
-				"Trade: %s because [%s] bull %.1f bear %.1f",
-				action,
-				reason or latestLabel,
-				news.bullScore,
-				news.bearScore
-			))
-			pcall(function()
-				ui:Trade()
-			end)
-			Trade.lastAt = now
-			if not holdingCrypto then
-				Trade.lastBuyAt = now
-				Trade.peak = price
-				Trade.trough = nil
-			else
-				Trade.lastBuyAt = 0
-				Trade.lastSellAt = now
-				Trade.trough = price
-				Trade.peak = nil
-			end
-			Trade.trend = 0
-			Trade.rises = 0
-			Trade.falls = 0
+		if action then
+			executeTradeAction(ui, now, action, reason, news, holdingCrypto, price)
 		elseif now - Trade.lastWaitLogAt >= Trade.WAIT_LOG then
 			Trade.lastWaitLogAt = now
 			local posTag = holdingCrypto and "IN" or "OUT"
-			local latestTag = news.latestHeader and (" latest=" .. news.latestHeader) or ""
 			log(string.format(
-				"Trade: waiting (%s) — [%s] bull %.1f bear %.1f net %+.1f trend %d%s",
+				"Trade: waiting (%s) — bull %.1f bear %.1f trend %d%s",
 				posTag,
-				latestLabel,
 				news.bullScore,
 				news.bearScore,
-				news.netScore,
 				Trade.trend,
-				latestTag
+				sessionCritical and " [CRITICAL]" or (sessionEnding and " [ENDGAME]" or "")
 			))
 		end
 	end)
@@ -3604,6 +3779,8 @@ local vReb = statRow(progInner, "Rebirths", C.accent)
 local vTReb = statRow(progInner, "Total Rebirths", C.gold)
 local vEvo = statRow(progInner, "Evolution", C.green)
 local vTEvo = statRow(progInner, "Total Evolves", C.green)
+local vAsc = statRow(progInner, "Ascension Run", C.gold)
+local vTAsc = statRow(progInner, "Total Ascensions", C.gold)
 
 local sesInner = sectionCard(homePage, "Session", "⏱")
 local vPlay = statRow(sesInner, "Play Time")
@@ -4041,7 +4218,7 @@ local function ascendInfoLine(text, color, order)
 end
 
 UI.ascendProgressLabel = ascendInfoLine("Tycoon progress: ...", C.text, 1)
-UI.ascendLevelLabel = ascendInfoLine("Ascension level: ...", C.gold, 2)
+UI.ascendLevelLabel = ascendInfoLine("Total ascensions: ...", C.gold, 2)
 UI.ascendStatusLabel = ascendInfoLine("Status: waiting for tycoon", C.muted, 3)
 
 local ascendBarWrap = Instance.new("Frame")
@@ -4062,7 +4239,7 @@ corner(UI.ascendBarFill, 4)
 local function refreshAscensionUI()
 	local asc = readAscensionStats()
 	UI.ascendProgressLabel.Text = "Tycoon progress: " .. asc.progressText
-	UI.ascendLevelLabel.Text = "Ascension level: " .. asc.level
+	UI.ascendLevelLabel.Text = "Total ascensions: " .. asc.level
 	if asc.ready then
 		UI.ascendStatusLabel.Text = Farm.autoAscend and "Status: ready — ascending soon" or "Status: ready to ascend (toggle off)"
 		UI.ascendStatusLabel.TextColor3 = C.green
@@ -4606,6 +4783,8 @@ end)
 	UI.vTReb = vTReb
 	UI.vEvo = vEvo
 	UI.vTEvo = vTEvo
+	UI.vAsc = vAsc
+	UI.vTAsc = vTAsc
 	UI.vPlay = vPlay
 	UI.vSess = vSess
 	UI.vFps = vFps
@@ -4706,6 +4885,8 @@ heartbeatConn = RunService.Heartbeat:Connect(function(dt)
 		UI.vTReb.Text = stats.totalRebirths
 		UI.vEvo.Text = stats.evolution
 		UI.vTEvo.Text = stats.totalEvolves
+		UI.vAsc.Text = stats.ascensions
+		UI.vTAsc.Text = stats.totalAscensions
 
 		UI.vPlay.Text = fmtTime(plr:GetAttribute("_Clock_TotalPlayTime"))
 		UI.vSess.Text = tostring(plr:GetAttribute("_Clock_SessionCount") or "?")
