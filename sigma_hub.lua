@@ -28,7 +28,7 @@ local CollectionService = game:GetService("CollectionService")
 local RS = game:GetService("ReplicatedStorage")
 local plr = Players.LocalPlayer
 
-local SIGMA_VERSION = "2026.06.23-fix1"
+local SIGMA_VERSION = "2026.06.23-ascend2"
 
 local LOOP_DELAY = 0.1
 local BUYS_PER_TICK = 8
@@ -121,6 +121,7 @@ local Farm = {
 	lastRebirthKickstartLogAt = 0,
 	lastAscendAttemptAt = 0,
 	lastAscendNoTycoonLogAt = 0,
+	lastAscendProgressLogAt = 0,
 	lastUpgradeLogAt = 0,
 	phoneConns = {},
 }
@@ -305,6 +306,43 @@ local function readStats()
 	end
 
 	return stats
+end
+
+local function readAscensionStats()
+	local out = {
+		progress = nil,
+		progressText = "N/A",
+		level = "N/A",
+		ready = false,
+	}
+	pcall(function()
+		local t = getTycoon()
+		if not t then
+			out.progressText = "No tycoon"
+			return
+		end
+		local ca = comp(t, "ClientAscension")
+		local ta = comp(t, "Ascension")
+		if ca then
+			local ok, progress = pcall(function()
+				return ca:GetAscensionProgress()
+			end)
+			if ok and progress then
+				out.progress = progress
+				out.progressText = string.format("%.0f%%", progress * 100)
+				out.ready = progress >= 1
+			end
+		end
+		if ta then
+			local ok, level = pcall(function()
+				return ta:GetAscension()
+			end)
+			if ok and level ~= nil then
+				out.level = tostring(level)
+			end
+		end
+	end)
+	return out
 end
 
 local function getHRP()
@@ -1698,7 +1736,11 @@ local function tryAutoAscend()
 	end
 
 	local progressText = string.format("%.0f%%", progress * 100)
-	log("Ascend check: progress " .. progressText .. " (need 100%)")
+	local now = os.clock()
+	if now - Farm.lastAscendProgressLogAt >= 8 then
+		Farm.lastAscendProgressLogAt = now
+		log("Ascend check: progress " .. progressText .. " (need 100%)")
+	end
 
 	-- Match in-game ascend button: progress must reach 100% (all purchases bought)
 	if progress < 1 then
@@ -3763,7 +3805,6 @@ refreshUpgradePresetButtons()
 
 makeToggle(farmInner, "Auto Cash Drops", "Collects cash bags", "autoCashDrop", "💵")
 local rebirthToggleDetail = makeToggle(farmInner, "Auto Rebirth", rebirthDescText(), "autoRebirth", "🔄")
-makeToggle(farmInner, "Auto Ascend", "Ascends when all tycoon upgrades are bought", "autoAscend", "🚀")
 
 local rebirthMultCard = Instance.new("Frame")
 rebirthMultCard.Size = UDim2.new(1, 0, 0, 44)
@@ -3842,6 +3883,95 @@ UI.rebirthMultBox:GetPropertyChangedSignal("Text"):Connect(function()
 end)
 
 makeToggle(farmInner, "Auto Phone Offers", "Raises once then accepts", "autoPhone", "📱")
+
+local ascendInner = sectionCard(farmPage, "Ascension", "🚀")
+
+local function ascendDescText()
+	if Farm.autoAscend then
+		return "Watching progress — ascends at 100%"
+	end
+	return "Turn on to ascend when all upgrades are bought"
+end
+
+UI.ascendToggleDetail = makeToggle(ascendInner, "Auto Ascend", ascendDescText(), "autoAscend", "⬆")
+
+local ascendInfoCard = Instance.new("Frame")
+ascendInfoCard.Size = UDim2.new(1, 0, 0, 72)
+ascendInfoCard.BackgroundColor3 = C.cardInner
+ascendInfoCard.BorderSizePixel = 0
+ascendInfoCard.Parent = ascendInner
+corner(ascendInfoCard, 10)
+stroke(ascendInfoCard, C.border, 1, 0.5)
+
+local ascendInfoPad = Instance.new("UIPadding")
+ascendInfoPad.PaddingTop = UDim.new(0, 10)
+ascendInfoPad.PaddingBottom = UDim.new(0, 10)
+ascendInfoPad.PaddingLeft = UDim.new(0, 12)
+ascendInfoPad.PaddingRight = UDim.new(0, 12)
+ascendInfoPad.Parent = ascendInfoCard
+
+local ascendInfoLayout = Instance.new("UIListLayout")
+ascendInfoLayout.Padding = UDim.new(0, 6)
+ascendInfoLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ascendInfoLayout.Parent = ascendInfoCard
+
+local function ascendInfoLine(text, color, order)
+	local lbl = Instance.new("TextLabel")
+	lbl.LayoutOrder = order
+	lbl.BackgroundTransparency = 1
+	lbl.Size = UDim2.new(1, 0, 0, 16)
+	lbl.Font = Enum.Font.Gotham
+	lbl.TextSize = 11
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.TextColor3 = color or C.muted
+	lbl.Text = text
+	lbl.Parent = ascendInfoCard
+	return lbl
+end
+
+UI.ascendProgressLabel = ascendInfoLine("Tycoon progress: ...", C.text, 1)
+UI.ascendLevelLabel = ascendInfoLine("Ascension level: ...", C.gold, 2)
+UI.ascendStatusLabel = ascendInfoLine("Status: waiting for tycoon", C.muted, 3)
+
+local ascendBarWrap = Instance.new("Frame")
+ascendBarWrap.LayoutOrder = 4
+ascendBarWrap.Size = UDim2.new(1, 0, 0, 8)
+ascendBarWrap.BackgroundColor3 = C.card
+ascendBarWrap.BorderSizePixel = 0
+ascendBarWrap.Parent = ascendInfoCard
+corner(ascendBarWrap, 4)
+
+UI.ascendBarFill = Instance.new("Frame")
+UI.ascendBarFill.Size = UDim2.fromScale(0, 1)
+UI.ascendBarFill.BackgroundColor3 = C.accent
+UI.ascendBarFill.BorderSizePixel = 0
+UI.ascendBarFill.Parent = ascendBarWrap
+corner(UI.ascendBarFill, 4)
+
+local function refreshAscensionUI()
+	local asc = readAscensionStats()
+	UI.ascendProgressLabel.Text = "Tycoon progress: " .. asc.progressText
+	UI.ascendLevelLabel.Text = "Ascension level: " .. asc.level
+	if asc.ready then
+		UI.ascendStatusLabel.Text = Farm.autoAscend and "Status: ready — ascending soon" or "Status: ready to ascend (toggle off)"
+		UI.ascendStatusLabel.TextColor3 = C.green
+		UI.ascendProgressLabel.TextColor3 = C.green
+	elseif asc.progress then
+		UI.ascendStatusLabel.Text = Farm.autoAscend and "Status: buying upgrades..." or "Status: in progress"
+		UI.ascendStatusLabel.TextColor3 = C.muted
+		UI.ascendProgressLabel.TextColor3 = C.text
+	else
+		UI.ascendStatusLabel.Text = "Status: " .. asc.progressText
+		UI.ascendStatusLabel.TextColor3 = C.muted
+		UI.ascendProgressLabel.TextColor3 = C.muted
+	end
+	UI.ascendBarFill.Size = UDim2.fromScale(math.clamp(asc.progress or 0, 0, 1), 1)
+	if UI.ascendToggleDetail then
+		UI.ascendToggleDetail.Text = ascendDescText()
+	end
+end
+
+table.insert(UI.toggleRefreshers, refreshAscensionUI)
 
 local function applyConfigData(data)
 	if type(data) ~= "table" then
@@ -4158,7 +4288,7 @@ aboutText.TextXAlignment = Enum.TextXAlignment.Left
 aboutText.TextYAlignment = Enum.TextYAlignment.Top
 aboutText.TextColor3 = C.muted
 aboutText.TextWrapped = true
-aboutText.Text = ("Sigma Scripts · Sell Lemons v%s\nRightControl toggles UI visibility.\nFarm tab: Auto Ascend is below Auto Rebirth.\nInfo → Configs saves toggles & multipliers."):format(SIGMA_VERSION)
+aboutText.Text = ("Sigma Scripts · Sell Lemons v%s\nRightControl toggles UI visibility.\nFarm → Ascension section for auto ascend.\nInfo → Configs saves toggles & multipliers."):format(SIGMA_VERSION)
 aboutText.Parent = aboutInner
 
 local teleportCount = 0
@@ -4479,6 +4609,7 @@ heartbeatConn = RunService.Heartbeat:Connect(function(dt)
 		UI.vFruits.Text = tostring(countActiveFruits())
 		UI.footerStatus.Text = Farm.lastAction
 		refreshUI()
+		refreshAscensionUI()
 
 		Farm.tick += 1
 		if Farm.tick % 20 == 0 and Farm.fruitState == "travel" then
