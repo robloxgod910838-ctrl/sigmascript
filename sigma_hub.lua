@@ -28,14 +28,16 @@ local CollectionService = game:GetService("CollectionService")
 local RS = game:GetService("ReplicatedStorage")
 local plr = Players.LocalPlayer
 
-local SIGMA_VERSION = "2026.06.23-ascend2"
+local SIGMA_VERSION = "2026.06.23-fruit2"
 
 local LOOP_DELAY = 0.1
 local BUYS_PER_TICK = 8
 local PHONE_RAISE_COUNT = 1
-local FRUIT_TRAVEL_DWELL = 0.25
-local FRUIT_MAX_COLLECT_ATTEMPTS = 20
-local FRUIT_EMPTY_CYCLE_DELAY = 0.75
+local FRUIT_TRAVEL_DWELL = 0.2
+local FRUIT_MAX_COLLECT_ATTEMPTS = 40
+local FRUIT_EMPTY_CYCLE_DELAY = 0.5
+local FRUIT_FULL_SCAN_INTERVAL = 14
+local FRUIT_REGISTRY_RIPE_INTERVAL = 1.25
 local CASH_TRAVEL_DWELL = 0.6
 local REBIRTH_KICKSTART_TIMEOUT = 45
 local REBIRTH_KICKSTART_WAKE_INTERVAL = 0.12
@@ -95,6 +97,9 @@ local Farm = {
 	logLines = {},
 	treeIndex = 1,
 	treeGroups = {},
+	treeRegistry = {},
+	lastFullTreeScanAt = 0,
+	lastRegistryRipeScanAt = 0,
 	fruitState = "travel",
 	lastTpTime = 0,
 	collectAttempts = 0,
@@ -111,6 +116,7 @@ local Farm = {
 	phoneUsesEvents = false,
 	tycoonRetries = 0,
 	lastTreeScanCount = nil,
+	lastRegisteredTreeCount = nil,
 	scannedTreeCount = 0,
 	lastRebirthAttemptAt = 0,
 	lastRebirthNoTycoonLogAt = 0,
@@ -871,19 +877,50 @@ local function scanTreeInstance(tree, byId, nameCounts)
 	end
 end
 
+local function getFruitScanRoots()
+	local roots = {}
+	local map = workspace:FindFirstChild("Map")
+	if map then
+		table.insert(roots, map)
+	end
+	for _, ch in workspace:GetChildren() do
+		if ch.Name:match("^Tycoon%d+$") and isCollectibleFruitScope(ch) then
+			table.insert(roots, ch)
+		end
+	end
+	if #roots == 0 then
+		table.insert(roots, workspace)
+	end
+	return roots
+end
+
 local function findAllProduceTrees()
 	local trees = {}
 	local seen = {}
-	for _, desc in workspace:GetDescendants() do
-		if isCollectibleFruitScope(desc) and isFruitTreeInstance(desc) and not isNestedInProduceTree(desc) and not seen[desc] then
-			seen[desc] = true
-			table.insert(trees, desc)
+	for _, root in getFruitScanRoots() do
+		for _, desc in root:GetDescendants() do
+			if isCollectibleFruitScope(desc) and isFruitTreeInstance(desc) and not isNestedInProduceTree(desc) and not seen[desc] then
+				seen[desc] = true
+				table.insert(trees, desc)
+			end
 		end
 	end
 	return trees
 end
 
 local function countRipeFruitsOnTree(group)
+	if group.fruits and #group.fruits > 0 then
+		local n = 0
+		for _, entry in group.fruits do
+			if entry.fruit.Parent then
+				local cd, prompt = resolveCollectInteraction(entry)
+				if cd or prompt then
+					n += 1
+				end
+			end
+		end
+		return n
+	end
 	local n = 0
 	local tree = group.root
 	if not tree or not tree.Parent then
@@ -900,12 +937,13 @@ local function countRipeFruitsOnTree(group)
 	return n
 end
 
-local function refreshTreeGroups()
-	local prevCount = #Farm.treeGroups
-	Farm.treeGroups = {}
-
+local function rebuildTreeRegistry()
 	local byId = {}
 	local nameCounts = {}
+
+	for _, tree in findAllProduceTrees() do
+		ensureTreeGroup(byId, tree, nameCounts)
+	end
 
 	for _, fruit in CollectionService:GetTagged("ClickFruit") do
 		if isCollectibleFruitScope(fruit) and fruit.Parent then
@@ -913,49 +951,85 @@ local function refreshTreeGroups()
 			if tree and tree ~= workspace then
 				ensureTreeGroup(byId, tree, nameCounts)
 			end
+		end
+	end
+
+	local registry = {}
+	for _, group in byId do
+		group.fruits = {}
+		table.insert(registry, group)
+	end
+	table.sort(registry, function(a, b)
+		return a.path < b.path
+	end)
+
+	Farm.treeRegistry = registry
+	Farm.scannedTreeCount = #registry
+	Farm.lastFullTreeScanAt = os.clock()
+
+	local prevRegistered = Farm.lastRegisteredTreeCount
+	if prevRegistered ~= #registry then
+		Farm.lastRegisteredTreeCount = #registry
+		log("Tree registry: " .. #registry .. " produce trees on map")
+	end
+end
+
+local function updateRipeTreeQueue(scanRegistryTrees)
+	local byId = {}
+	local nameCounts = {}
+
+	for _, fruit in CollectionService:GetTagged("ClickFruit") do
+		if isCollectibleFruitScope(fruit) and fruit.Parent then
 			collectFruitFromNode(fruit, byId, nameCounts)
 		end
 	end
 
-	for _, tree in findAllProduceTrees() do
-		scanTreeInstance(tree, byId, nameCounts)
-	end
-
-	Farm.scannedTreeCount = 0
-	for _ in byId do
-		Farm.scannedTreeCount += 1
+	if scanRegistryTrees then
+		for _, reg in Farm.treeRegistry do
+			local tree = reg.root
+			if tree and tree.Parent then
+				local group = ensureTreeGroup(byId, tree, nameCounts)
+				group.path = reg.path
+				group.name = reg.name
+				group.treeId = reg.treeId
+				for _, desc in tree:GetDescendants() do
+					if isFruitNode(desc) then
+						collectFruitFromNode(desc, byId, nameCounts)
+					end
+				end
+			end
+		end
+		Farm.lastRegistryRipeScanAt = os.clock()
 	end
 
 	local order = {}
-	local fruitCount = 0
 	local ripeTreeCount = 0
+	local fruitCount = 0
 	for _, group in byId do
 		local ripe = countRipeFruitsOnTree(group)
 		if ripe > 0 then
 			ripeTreeCount += 1
-			table.insert(order, group)
 			fruitCount += ripe
+			table.insert(order, group)
 		end
 	end
 	table.sort(order, function(a, b)
 		return a.path < b.path
 	end)
+
+	local prevRipe = #Farm.treeGroups
 	Farm.treeGroups = order
 
-	if #order ~= prevCount or Farm.lastTreeScanCount ~= #order then
-		Farm.lastTreeScanCount = #order
+	if prevRipe ~= #order then
 		log(
-			"Tree scan: "
-				.. Farm.scannedTreeCount
-				.. " trees, "
+			"Ripe trees: "
 				.. ripeTreeCount
-				.. " with ripe fruits ("
+				.. "/"
+				.. Farm.scannedTreeCount
+				.. " ("
 				.. fruitCount
-				.. " total) — full map"
+				.. " fruits)"
 		)
-		for _, group in order do
-			log("  → " .. group.name .. " id=" .. group.treeId .. " ripe=" .. countRipeFruitsOnTree(group))
-		end
 	end
 
 	if Farm.treeIndex > #Farm.treeGroups then
@@ -965,6 +1039,19 @@ local function refreshTreeGroups()
 			Farm.treeIndex = math.min(Farm.treeIndex, math.max(1, #Farm.treeGroups))
 		end
 	end
+end
+
+local function refreshTreeGroups(forceFull)
+	local now = os.clock()
+	if forceFull or #Farm.treeRegistry == 0 or now - Farm.lastFullTreeScanAt >= FRUIT_FULL_SCAN_INTERVAL then
+		rebuildTreeRegistry()
+	end
+
+	local scanRegistry = forceFull
+		or now - Farm.lastRegistryRipeScanAt >= FRUIT_REGISTRY_RIPE_INTERVAL
+		or #Farm.treeGroups == 0
+
+	updateRipeTreeQueue(scanRegistry)
 end
 
 local function getTreePosition(group)
@@ -1006,6 +1093,19 @@ end
 
 local function getActiveFruitsOnTree(group)
 	local active = {}
+	if group.fruits and #group.fruits > 0 then
+		for _, entry in group.fruits do
+			if entry.fruit.Parent then
+				local cd, prompt = resolveCollectInteraction(entry)
+				if (cd or prompt) and entry.pos then
+					table.insert(active, { fruit = entry.fruit, cd = cd, prompt = prompt, pos = entry.pos })
+				end
+			end
+		end
+		if #active > 0 then
+			return active
+		end
+	end
 	local tree = group.root
 	if not tree or not tree.Parent then
 		return active
@@ -1032,7 +1132,7 @@ end
 local function advanceToNextTree()
 	Farm.treeIndex += 1
 	if Farm.treeIndex > #Farm.treeGroups then
-		refreshTreeGroups()
+		refreshTreeGroups(true)
 		Farm.treeIndex = 1
 		if #Farm.treeGroups == 0 then
 			Farm.fruitCycleAt = os.clock()
@@ -1055,12 +1155,15 @@ end
 local function tryAutoFruit()
 	local now = os.clock()
 
-	if #Farm.treeGroups == 0 then
-		refreshTreeGroups()
+	if #Farm.treeRegistry == 0 then
+		refreshTreeGroups(true)
+	elseif #Farm.treeGroups == 0 then
+		refreshTreeGroups(false)
 	end
+
 	if #Farm.treeGroups == 0 and getTycoonInstance() then
 		loadModules()
-		refreshTreeGroups()
+		refreshTreeGroups(true)
 	end
 	if #Farm.treeGroups == 0 then
 		if Farm.fruitCycleAt == 0 then
@@ -1071,7 +1174,7 @@ local function tryAutoFruit()
 			return
 		end
 		Farm.fruitCycleAt = 0
-		refreshTreeGroups()
+		refreshTreeGroups(true)
 		if #Farm.treeGroups == 0 then
 			Farm.fruitCycleAt = now
 			setStatus(fruitWaitingStatus())
@@ -1090,7 +1193,7 @@ local function tryAutoFruit()
 
 	local group = Farm.treeGroups[Farm.treeIndex]
 	if not group or not group.root or not group.root.Parent then
-		refreshTreeGroups()
+		refreshTreeGroups(false)
 		advanceToNextTree()
 		return
 	end
@@ -1098,7 +1201,7 @@ local function tryAutoFruit()
 	if Farm.fruitState == "travel" then
 		local active = getActiveFruitsOnTree(group)
 		if #active == 0 then
-			refreshTreeGroups()
+			refreshTreeGroups(false)
 			advanceToNextTree()
 			return
 		end
@@ -1130,7 +1233,7 @@ local function tryAutoFruit()
 	if Farm.fruitState == "collecting" then
 		local active = getActiveFruitsOnTree(group)
 		if #active == 0 then
-			refreshTreeGroups()
+			refreshTreeGroups(false)
 			setStatus(group.name .. ": cleared")
 			if now - Farm.lastFruitLogAt > 1 then
 				Farm.lastFruitLogAt = now
@@ -1145,31 +1248,39 @@ local function tryAutoFruit()
 			if not entry.fruit.Parent then
 				continue
 			end
-			local cd, prompt = resolveCollectInteraction(entry)
-			if not (cd or prompt) then
-				continue
-			end
 			if fireCollectInteraction(entry) then
 				clicked += 1
 			end
 		end
 		Farm.collectAttempts += 1
 
-		local remaining = #getActiveFruitsOnTree(group)
+		local remaining = 0
+		for _, entry in active do
+			if entry.fruit.Parent then
+				local cd, prompt = resolveCollectInteraction(entry)
+				if cd or prompt then
+					remaining += 1
+				end
+			end
+		end
+
 		if remaining == 0 then
-			refreshTreeGroups()
+			refreshTreeGroups(false)
 			setStatus(group.name .. ": cleared")
 			log("Fruit: " .. group.name .. " collected " .. clicked)
 			advanceToNextTree()
 		elseif Farm.collectAttempts >= FRUIT_MAX_COLLECT_ATTEMPTS then
-			refreshTreeGroups()
+			refreshTreeGroups(true)
 			setStatus(group.name .. ": next tree")
 			log("Fruit: " .. group.name .. " max attempts, ripe=" .. remaining)
 			advanceToNextTree()
 		elseif clicked > 0 then
 			setStatus(group.name .. ": " .. clicked .. " fruits")
-			log("Fruit: " .. group.name .. " +" .. clicked .. " (left " .. remaining .. ")")
-		elseif Farm.collectAttempts % 5 == 1 and now - Farm.lastFruitLogAt > 1 then
+			if now - Farm.lastFruitLogAt > 1 then
+				Farm.lastFruitLogAt = now
+				log("Fruit: " .. group.name .. " +" .. clicked .. " (left " .. remaining .. ")")
+			end
+		elseif Farm.collectAttempts % 8 == 1 and now - Farm.lastFruitLogAt > 2 then
 			Farm.lastFruitLogAt = now
 			log("Fruit: " .. group.name .. " try #" .. Farm.collectAttempts .. " ripe=" .. #active)
 		end
@@ -2751,8 +2862,8 @@ local function retryTycoonLoad()
 		if Farm.autoPhone then
 			setupPhoneAuto()
 		end
-		if Farm.autoFruit and #Farm.treeGroups == 0 then
-			refreshTreeGroups()
+		if Farm.autoFruit and #Farm.treeRegistry == 0 then
+			refreshTreeGroups(true)
 		end
 		return
 	end
@@ -2799,7 +2910,7 @@ local function setFeature(key, enabled)
 	Farm[key] = enabled
 	if enabled then
 		if key == "autoFruit" then
-			refreshTreeGroups()
+			refreshTreeGroups(true)
 			Farm.fruitState = "travel"
 			Farm.lastTpTime = 0
 			Farm.collectAttempts = 0
@@ -4529,9 +4640,9 @@ local function fmtTime(sec)
 	return string.format("%dh %dm", math.floor(sec / 3600), math.floor((sec % 3600) / 60))
 end
 
-refreshTreeGroups()
+refreshTreeGroups(true)
 setStatus("Hub active")
-log("Loaded " .. #Farm.treeGroups .. " trees | Heartbeat loops active")
+log("Loaded " .. Farm.scannedTreeCount .. " trees (" .. #Farm.treeGroups .. " ripe) | Heartbeat loops active")
 
 local hb = { stats = 0, tycoon = 0, toggle = 0, minigame = 0 }
 heartbeatConn = RunService.Heartbeat:Connect(function(dt)
@@ -4612,8 +4723,8 @@ heartbeatConn = RunService.Heartbeat:Connect(function(dt)
 		refreshAscensionUI()
 
 		Farm.tick += 1
-		if Farm.tick % 20 == 0 and Farm.fruitState == "travel" then
-			refreshTreeGroups()
+		if Farm.autoFruit and Farm.tick % 120 == 0 then
+			refreshTreeGroups(true)
 		end
 	end
 end)
