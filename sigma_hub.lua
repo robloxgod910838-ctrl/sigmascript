@@ -5454,7 +5454,7 @@ titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextSize = 16
 titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.TextColor3 = C.text
-titleLabel.Text = "🍬 Candy Escape  " .. CANDY_VERSION
+titleLabel.Text = "[UPD] +1 Speed Keyboard Escape | Candy & Chocolate  " .. CANDY_VERSION
 titleLabel.Parent = titleBar
 
 local minBtn = Instance.new("TextButton")
@@ -5876,26 +5876,36 @@ local SELL_LEMONS_UNIVERSE_ID = 7395930870
 local SELL_LEMONS_ICON_URL =
 	"https://tr.rbxcdn.com/180DAY-3d8fd895f358e86fb886c17fe06201d8/256/256/Image/Png/noFilter"
 
+local CANDY_ESCAPE_PLACE_ID = 95082159892680
+local CANDY_ESCAPE_UNIVERSE_ID = 9584852943
+local CANDY_ESCAPE_ICON_URL =
+	"https://tr.rbxcdn.com/180DAY-207e9d6ae7e65d6db5ce5963e2c68d61/256/256/Image/Png/noFilter"
+
 local GAMES = {
 	{
 		id = "sell_lemons",
 		name = "Sell Lemons",
 		subtitle = "Tycoon · Farm · Minigames",
 		keywords = { "sell", "lemon", "lemons", "tycoon", "farm", "fruit" },
-		placeIds = { 79268393072444 },
+		placeIds = { SELL_LEMONS_PLACE_ID },
 		status = "working",
-		placeId = 79268393072444,
+		placeId = SELL_LEMONS_PLACE_ID,
+		universeId = SELL_LEMONS_UNIVERSE_ID,
+		iconUrl = SELL_LEMONS_ICON_URL,
 		iconPath = "assets/sell_lemons_icon.png",
 		file = "sell_lemons.lua",
+		embeddedIcon = true,
 	},
 	{
 		id = "candy_escape",
-		name = "Candy Escape",
-		subtitle = "+1 Speed Keyboard Escape · Wins · Rebirth",
-		keywords = { "candy", "chocolate", "escape", "keyboard", "speed", "obby", "treadmill" },
-		placeIds = { 95082159892680 },
+		name = "[UPD] +1 Speed Keyboard Escape | Candy & Chocolate",
+		subtitle = "Speed · Wins · Rebirth · Auto-farm",
+		keywords = { "candy", "chocolate", "escape", "keyboard", "speed", "obby", "treadmill", "upd" },
+		placeIds = { CANDY_ESCAPE_PLACE_ID },
 		status = "working",
-		placeId = 95082159892680,
+		placeId = CANDY_ESCAPE_PLACE_ID,
+		universeId = CANDY_ESCAPE_UNIVERSE_ID,
+		iconUrl = CANDY_ESCAPE_ICON_URL,
 		iconPath = "assets/candy_escape_icon.png",
 		file = "candy_escape.lua",
 		iconFallback = "🍬",
@@ -6036,38 +6046,52 @@ local function decodeBase64(data)
 	return nil
 end
 
-local function tryCustomAssetIcon(iconPath)
+local function tryCustomAssetIcon(entry)
 	if not getcustomasset then
 		return nil
 	end
-	local candidates = {
-		iconPath,
-		"assets/sell_lemons_icon.png",
-		"./assets/sell_lemons_icon.png",
-		"../assets/sell_lemons_icon.png",
-		"roblox-executor-mcp-main/assets/sell_lemons_icon.png",
-		"roblox-executor-mcp-main\\assets\\sell_lemons_icon.png",
-		"C:\\Users\\Krish\\Desktop\\roblox-executor-mcp-main\\assets\\sell_lemons_icon.png",
-		"C:/Users/Krish/Desktop/roblox-executor-mcp-main/assets/sell_lemons_icon.png",
-		"sigma_hub_sell_lemons_icon.png",
-		"./sigma_hub_sell_lemons_icon.png",
-	}
+	local candidates = {}
+	local function add(path)
+		if type(path) == "string" and #path > 0 then
+			table.insert(candidates, path)
+		end
+	end
+
+	add(entry.iconPath)
+	if entry.iconPath then
+		add("./" .. entry.iconPath)
+		add("../" .. entry.iconPath)
+		add("roblox-executor-mcp-main/" .. entry.iconPath)
+		add("roblox-executor-mcp-main\\" .. entry.iconPath:gsub("/", "\\"))
+		add("C:\\Users\\Krish\\Desktop\\roblox-executor-mcp-main\\" .. entry.iconPath:gsub("/", "\\"))
+		add("C:/Users/Krish/Desktop/roblox-executor-mcp-main/" .. entry.iconPath)
+	end
+
+	if entry.id == "sell_lemons" then
+		add("sigma_hub_sell_lemons_icon.png")
+		add("./sigma_hub_sell_lemons_icon.png")
+	elseif entry.id == "candy_escape" then
+		add("sigma_hub_candy_escape_icon.png")
+		add("./sigma_hub_candy_escape_icon.png")
+	end
+
 	for _, p in candidates do
-		if p and #p > 0 then
-			local ok, asset = pcall(getcustomasset, p)
-			if ok and type(asset) == "string" and #asset > 0 then
-				return asset, "getcustomasset:" .. p
-			end
+		local ok, asset = pcall(getcustomasset, p)
+		if ok and type(asset) == "string" and #asset > 0 then
+			return asset, "getcustomasset:" .. p
 		end
 	end
 	return nil
 end
 
-local embeddedIconAsset
+local embeddedIconAssets = {}
 
-local function tryEmbeddedIcon()
-	if embeddedIconAsset then
-		return embeddedIconAsset, "embedded-cache"
+local function tryEmbeddedIcon(entry)
+	if entry and entry.embeddedIcon ~= true then
+		return nil
+	end
+	if entry and entry.id and embeddedIconAssets[entry.id] then
+		return embeddedIconAssets[entry.id], "embedded-cache"
 	end
 	if type(EMBEDDED_ICON_BASE64) ~= "string" or #EMBEDDED_ICON_BASE64 < 32 then
 		return nil
@@ -6091,7 +6115,9 @@ local function tryEmbeddedIcon()
 		if okW then
 			local okA, asset = pcall(getcustomasset, iconFile)
 			if okA and type(asset) == "string" and #asset > 0 then
-				embeddedIconAsset = asset
+				if entry and entry.id then
+					embeddedIconAssets[entry.id] = asset
+				end
 				return asset, "embedded-base64"
 			end
 		end
@@ -6099,7 +6125,7 @@ local function tryEmbeddedIcon()
 	return nil
 end
 
-local function tryHttpDownloadIcon(imageUrl)
+local function tryHttpDownloadIcon(imageUrl, cacheKey)
 	if not writefile or not getcustomasset then
 		return nil
 	end
@@ -6119,7 +6145,7 @@ local function tryHttpDownloadIcon(imageUrl)
 		return nil
 	end
 
-	local iconFile = "sigma_hub_downloaded_icon.png"
+	local iconFile = "sigma_hub_downloaded_icon_" .. tostring(cacheKey or "default") .. ".png"
 	local okW = pcall(writefile, iconFile, body)
 	if not okW then
 		return nil
@@ -6133,6 +6159,10 @@ local function tryHttpDownloadIcon(imageUrl)
 end
 
 local function tryRobloxIconUrl(entry)
+	if type(entry.iconUrl) == "string" and #entry.iconUrl > 0 then
+		return entry.iconUrl
+	end
+
 	local function fetchThumbnailJson(url)
 		local body
 		if http and http.request then
@@ -6158,7 +6188,10 @@ local function tryRobloxIconUrl(entry)
 		return nil
 	end
 
-	local placeId = entry.placeId or SELL_LEMONS_PLACE_ID
+	local placeId = entry.placeId
+	if not placeId then
+		return nil
+	end
 	local imageUrl = nil
 
 	local ok1 = pcall(function()
@@ -6172,11 +6205,11 @@ local function tryRobloxIconUrl(entry)
 	end
 
 	local universeIds = {}
-	if game.GameId and game.GameId > 0 then
-		table.insert(universeIds, game.GameId)
+	if entry.universeId and entry.universeId > 0 then
+		table.insert(universeIds, entry.universeId)
 	end
-	if SELL_LEMONS_UNIVERSE_ID > 0 then
-		table.insert(universeIds, SELL_LEMONS_UNIVERSE_ID)
+	if game.GameId and game.GameId > 0 and gameWorksHere(entry) then
+		table.insert(universeIds, game.GameId)
 	end
 
 	for _, universeId in universeIds do
@@ -6231,13 +6264,13 @@ local function fetchGameIcon(iconLabel, fallbackLabel, entry, statusLabel)
 	iconLabel.Image = ""
 
 	task.spawn(function()
-		local asset, method = tryEmbeddedIcon()
+		local asset, method = tryEmbeddedIcon(entry)
 		if asset then
 			applyIcon(iconLabel, fallbackLabel, asset, statusLabel, method)
 			return
 		end
 
-		asset, method = tryCustomAssetIcon(entry.iconPath)
+		asset, method = tryCustomAssetIcon(entry)
 		if asset then
 			applyIcon(iconLabel, fallbackLabel, asset, statusLabel, method)
 			return
@@ -6245,7 +6278,7 @@ local function fetchGameIcon(iconLabel, fallbackLabel, entry, statusLabel)
 
 		local thumbUrl = tryRobloxIconUrl(entry)
 		if thumbUrl then
-			asset, method = tryHttpDownloadIcon(thumbUrl)
+			asset, method = tryHttpDownloadIcon(thumbUrl, entry.id)
 			if asset then
 				applyIcon(iconLabel, fallbackLabel, asset, statusLabel, method)
 				return
@@ -6507,7 +6540,7 @@ end
 
 for _, entry in GAMES do
 	local card = Instance.new("TextButton")
-	card.Size = UDim2.new(1, 0, 0, 72)
+	card.Size = UDim2.new(1, 0, 0, 88)
 	card.BackgroundColor3 = C.card
 	card.Text = ""
 	card.AutoButtonColor = false
@@ -6542,19 +6575,21 @@ for _, entry in GAMES do
 
 	local name = Instance.new("TextLabel")
 	name.BackgroundTransparency = 1
-	name.Size = UDim2.new(1, -130, 0, 22)
-	name.Position = UDim2.fromOffset(76, 14)
+	name.Size = UDim2.new(1, -130, 0, 40)
+	name.Position = UDim2.fromOffset(76, 10)
 	name.Font = Enum.Font.GothamBold
-	name.TextSize = 16
+	name.TextSize = 12
 	name.TextXAlignment = Enum.TextXAlignment.Left
+	name.TextYAlignment = Enum.TextYAlignment.Top
+	name.TextWrapped = true
 	name.TextColor3 = C.text
 	name.Text = entry.name
 	name.Parent = card
 
 	local sub = Instance.new("TextLabel")
 	sub.BackgroundTransparency = 1
-	sub.Size = UDim2.new(1, -130, 0, 32)
-	sub.Position = UDim2.fromOffset(76, 34)
+	sub.Size = UDim2.new(1, -130, 0, 28)
+	sub.Position = UDim2.fromOffset(76, 50)
 	sub.Font = Enum.Font.Gotham
 	sub.TextSize = 11
 	sub.TextXAlignment = Enum.TextXAlignment.Left
