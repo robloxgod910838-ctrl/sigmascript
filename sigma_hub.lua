@@ -46,8 +46,10 @@ local MODULE_PATHS = {
 	{ "Purchases", RS.Modules.Tycoon.Component.TycoonPurchases },
 	{ "Rebirth", RS.Modules.Tycoon.Component.TycoonRebirth },
 	{ "Evolution", RS.Modules.Tycoon.Component.TycoonEvolution },
+	{ "Ascension", RS.Modules.Tycoon.Component.TycoonAscension },
 	{ "ClientBalances", RS.Modules.Tycoon.Component.Client.ClientTycoonBalances },
 	{ "ClientRebirth", RS.Modules.Tycoon.Component.Client.ClientTycoonRebirth },
+	{ "ClientAscension", RS.Modules.Tycoon.Component.Client.ClientTycoonAscension },
 	{ "ClientIncome", RS.Modules.Tycoon.Component.Client.ClientTycoonIncome },
 	{ "ClientPhoneOffers", RS.Modules.Tycoon.Component.Client.ClientTycoonPhoneOffers },
 	{ "Balance", RS.Balance },
@@ -79,6 +81,7 @@ local Farm = {
 	autoFruit = false,
 	autoUpgrade = false,
 	autoRebirth = false,
+	autoAscend = false,
 	autoCashDrop = false,
 	autoComplete = false,
 	autoPhone = false,
@@ -114,6 +117,8 @@ local Farm = {
 	rebirthKickstartStartedAt = 0,
 	lastRebirthKickstartWakeAt = 0,
 	lastRebirthKickstartLogAt = 0,
+	lastAscendAttemptAt = 0,
+	lastAscendNoTycoonLogAt = 0,
 	lastUpgradeLogAt = 0,
 	phoneConns = {},
 }
@@ -1651,6 +1656,95 @@ local function tryAutoRebirth()
 	end
 end
 
+local function invokeAscend(ca)
+	-- Normal ascension: UIAscensionMenu calls AscendAsync() -> InvokeServer()
+	if ca.AscendAsync then
+		return ca:AscendAsync()
+	end
+	if ca.AscendRemote then
+		return ca.AscendRemote:InvokeServer()
+	end
+	error("ClientAscension missing AscendAsync/AscendRemote")
+end
+
+local function tryAutoAscend()
+	loadModules()
+
+	local t = getTycoon()
+	if not t then
+		local now = os.clock()
+		if now - Farm.lastAscendNoTycoonLogAt >= 10 then
+			Farm.lastAscendNoTycoonLogAt = now
+			log("Ascend check: waiting for tycoon")
+		end
+		return
+	end
+
+	local ca = comp(t, "ClientAscension")
+	local ta = comp(t, "Ascension")
+	if not ca then
+		log("Ascend check: missing ClientAscension (required for AscendRemote)")
+		return
+	end
+
+	local okProg, progress = pcall(function()
+		return ca:GetAscensionProgress()
+	end)
+	if not (okProg and progress) then
+		log("Ascend check: could not read ascension progress")
+		return
+	end
+
+	local progressText = string.format("%.0f%%", progress * 100)
+	log("Ascend check: progress " .. progressText .. " (need 100%)")
+
+	-- Match in-game ascend button: progress must reach 100% (all purchases bought)
+	if progress < 1 then
+		return
+	end
+
+	local now = os.clock()
+	if now - Farm.lastAscendAttemptAt < 3 then
+		return
+	end
+	Farm.lastAscendAttemptAt = now
+
+	local beforeAscension
+	if ta then
+		pcall(function()
+			beforeAscension = ta:GetAscension()
+		end)
+	end
+
+	log("Ascend: invoking (all upgrades purchased)")
+	local ok, result = pcall(function()
+		return invokeAscend(ca)
+	end)
+	if not ok then
+		log("Ascend fail: " .. tostring(result))
+		return
+	end
+
+	if result then
+		log("Ascend success")
+		setStatus("Ascended!")
+		return
+	end
+
+	local afterAscension
+	if ta then
+		pcall(function()
+			afterAscension = ta:GetAscension()
+		end)
+	end
+	if beforeAscension and afterAscension and afterAscension > beforeAscension then
+		log("Ascend success (level " .. tostring(afterAscension) .. ")")
+		setStatus("Ascended!")
+	else
+		log("Ascend declined by server (returned " .. tostring(result) .. ")")
+	end
+end
+
 local function tryAutoComplete()
 	local kickstarting = tryRebirthKickstart()
 	local bought = tryAutoBuy(BUYS_PER_TICK)
@@ -2547,6 +2641,7 @@ local FEATURE_HANDLERS = {
 	end,
 	autoCashDrop = tryAutoCashDrop,
 	autoRebirth = tryAutoRebirth,
+	autoAscend = tryAutoAscend,
 	autoComplete = tryAutoComplete,
 	autoPhone = tryAutoPhone,
 	autoTrade = tryAutoTrade,
@@ -2558,6 +2653,7 @@ local FEATURE_DELAYS = {
 	autoUpgrade = LOOP_DELAY,
 	autoCashDrop = 1.25,
 	autoRebirth = 2,
+	autoAscend = 2,
 	autoComplete = LOOP_DELAY,
 	autoPhone = 1.5,
 	autoTrade = 8,
@@ -2630,6 +2726,7 @@ local FEATURE_CONFIG_KEYS = {
 	"autoUpgrade",
 	"autoCashDrop",
 	"autoRebirth",
+	"autoAscend",
 	"autoPhone",
 	"autoTrade",
 	"autoRace",
@@ -3650,6 +3747,8 @@ UI.rebirthMultBox:GetPropertyChangedSignal("Text"):Connect(function()
 	end
 end)
 
+makeToggle(farmInner, "Auto Ascend", "Ascends when all upgrades are purchased", "autoAscend", "⬆️")
+
 makeToggle(farmInner, "Auto Phone Offers", "Raises once then accepts", "autoPhone", "📱")
 
 local function applyConfigData(data)
@@ -3710,7 +3809,7 @@ makeActionBtn("▶  Enable All Farm", C.accentDim, function()
 end)
 
 makeActionBtn("⏹  Disable All", C.card, function()
-	for _, key in ipairs({ "autoComplete", "autoFruit", "autoUpgrade", "autoCashDrop", "autoRebirth", "autoPhone" }) do
+	for _, key in ipairs({ "autoComplete", "autoFruit", "autoUpgrade", "autoCashDrop", "autoRebirth", "autoAscend", "autoPhone" }) do
 		setFeature(key, false)
 	end
 	log("Disabled all farm automations")
