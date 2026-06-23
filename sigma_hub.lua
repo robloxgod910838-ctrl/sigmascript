@@ -5014,7 +5014,7 @@ end
 getgenv().SigmaScriptsRunning = nil
 ]=],
 	anime_defend = [=[-- Sigma Scripts: Defend ur base with anime
--- Features: Auto Wheel (Analysis, Strategy, Execution, Logging)
+-- Features: Auto Wheel (Analysis, Strategy, Execution, Logging, Target Selection)
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -5034,7 +5034,8 @@ local Wheel = {
     logs = {},
     lastSpin = 0,
     isSpinning = false,
-    strategy = "Balanced", -- Balanced, Rarity-Focused, Resource-Focused
+    strategy = "Balanced", -- Balanced, Manual
+    manualTarget = nil, -- Index of the reward to target
 }
 
 -- Constants for Strategy
@@ -5065,7 +5066,7 @@ local C = {
 --------------------------------------------------------------------------------
 
 local function logToFile(msg)
-    local timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    local timestamp = os.date("!%H:%M:%SZ")
     local line = string.format("[%s] %s\n", timestamp, msg)
     table.insert(Wheel.logs, 1, line)
     if #Wheel.logs > 50 then table.remove(Wheel.logs) end
@@ -5106,6 +5107,7 @@ local function analyzeRewards()
         end
         
         analysis[id] = {
+            id = id,
             name = reward.Name,
             chance = reward.Chance,
             rarity = rarity,
@@ -5119,6 +5121,11 @@ end
 local function calculateRewardScore(rewardId, analysis)
     local r = analysis[rewardId]
     if not r then return 0 end
+    
+    -- Manual Priority
+    if Wheel.manualTarget == rewardId then
+        return 1000000
+    end
     
     local score = RARITY_VALUES[r.rarity] or 1
     
@@ -5173,12 +5180,15 @@ local function trySpin()
     local bestId, bestScore = getOptimalReward(analysis)
     local bestReward = analysis[bestId]
     
-    logToFile(string.format("Strategy: %s | Optimal Target: %s (Score: %.1f)", Wheel.strategy, bestReward.name, bestScore))
+    local mode = Wheel.manualTarget and "Manual" or "Auto"
+    logToFile(string.format("Mode: %s | Target: %s (Score: %.1f)", mode, bestReward.name, bestScore))
     
-    -- Fire Spin
-    SpinRemote:FireServer("Spin")
-    
-    -- Wait for result (handled by OnClientEvent connection)
+    -- Fire Spin with target index (if server respects it)
+    if Wheel.manualTarget then
+        SpinRemote:FireServer("Spin", Wheel.manualTarget)
+    else
+        SpinRemote:FireServer("Spin")
+    end
 end
 
 -- Listen for results
@@ -5196,7 +5206,7 @@ SpinRemote.OnClientEvent:Connect(function(p1)
         logToFile(string.format("Spin Result: %s (%s) - %s", reward.name, reward.rarity, p1.NotifyText or ""))
         
         -- Complete the spin to claim
-        task.wait(6) -- Wait for wheel animation (client-side usually takes 5.8s)
+        task.wait(6) -- Wait for wheel animation
         SpinRemote:FireServer("Complete", { NotifyText = p1.NotifyText })
         Wheel.isSpinning = false
     else
@@ -5205,17 +5215,20 @@ SpinRemote.OnClientEvent:Connect(function(p1)
 end)
 
 --------------------------------------------------------------------------------
--- UI (Simplified for injection)
+-- UI
 --------------------------------------------------------------------------------
 
 local function buildUI()
-    local gui = Instance.new("ScreenGui")
+    local gui = plr.PlayerGui:FindFirstChild("AnimeDefend")
+    if gui then gui:Destroy() end
+    
+    gui = Instance.new("ScreenGui")
     gui.Name = "AnimeDefend"
     gui.ResetOnSpawn = false
     gui.Parent = plr.PlayerGui
     
     local main = Instance.new("Frame")
-    main.Size = UDim2.fromOffset(400, 300)
+    main.Size = UDim2.fromOffset(450, 450)
     main.Position = UDim2.fromScale(0.5, 0.5)
     main.AnchorPoint = Vector2.new(0.5, 0.5)
     main.BackgroundColor3 = C.bg
@@ -5235,16 +5248,54 @@ local function buildUI()
     title.Parent = main
     
     local toggle = Instance.new("TextButton")
-    toggle.Size = UDim2.new(0.8, 0, 0, 40)
-    toggle.Position = UDim2.fromScale(0.1, 0.2)
+    toggle.Size = UDim2.new(0.4, 0, 0, 40)
+    toggle.Position = UDim2.fromScale(0.05, 0.12)
     toggle.Text = "Auto Spin: OFF"
     toggle.BackgroundColor3 = C.card
     toggle.TextColor3 = C.text
     toggle.Parent = main
     
+    local clearTarget = Instance.new("TextButton")
+    clearTarget.Size = UDim2.new(0.4, 0, 0, 40)
+    clearTarget.Position = UDim2.fromScale(0.55, 0.12)
+    clearTarget.Text = "Strategy: Auto"
+    clearTarget.BackgroundColor3 = C.card
+    clearTarget.TextColor3 = C.text
+    clearTarget.Parent = main
+
+    local targetTitle = Instance.new("TextLabel")
+    targetTitle.Size = UDim2.new(1, 0, 0, 30)
+    targetTitle.Position = UDim2.fromScale(0, 0.22)
+    targetTitle.Text = "Select Target (Click to prioritize):"
+    targetTitle.TextColor3 = C.muted
+    targetTitle.BackgroundTransparency = 1
+    targetTitle.Font = Enum.Font.GothamMedium
+    targetTitle.Parent = main
+
+    local rewardFrame = Instance.new("ScrollingFrame")
+    rewardFrame.Size = UDim2.new(0.9, 0, 0.3, 0)
+    rewardFrame.Position = UDim2.fromScale(0.05, 0.3)
+    rewardFrame.BackgroundColor3 = C.panel
+    rewardFrame.BorderSizePixel = 0
+    rewardFrame.ScrollBarThickness = 2
+    rewardFrame.Parent = main
+    
+    local rewardList = Instance.new("UIListLayout")
+    rewardList.Padding = UDim.new(0, 5)
+    rewardList.Parent = rewardFrame
+
+    local logTitle = Instance.new("TextLabel")
+    logTitle.Size = UDim2.new(1, 0, 0, 30)
+    logTitle.Position = UDim2.fromScale(0, 0.62)
+    logTitle.Text = "Live Logs:"
+    logTitle.TextColor3 = C.muted
+    logTitle.BackgroundTransparency = 1
+    logTitle.Font = Enum.Font.GothamMedium
+    logTitle.Parent = main
+
     local logFrame = Instance.new("ScrollingFrame")
-    logFrame.Size = UDim2.new(0.9, 0, 0.5, 0)
-    logFrame.Position = UDim2.fromScale(0.05, 0.45)
+    logFrame.Size = UDim2.new(0.9, 0, 0.3, 0)
+    logFrame.Position = UDim2.fromScale(0.05, 0.68)
     logFrame.BackgroundColor3 = C.panel
     logFrame.BorderSizePixel = 0
     logFrame.ScrollBarThickness = 2
@@ -5269,12 +5320,42 @@ local function buildUI()
         end
         logFrame.CanvasSize = UDim2.fromOffset(0, #Wheel.logs * 20)
     end
+
+    local function populateRewards()
+        local analysis = analyzeRewards()
+        for id, r in pairs(analysis) do
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(1, 0, 0, 25)
+            btn.BackgroundColor3 = C.card
+            btn.Text = string.format("[%s] %s (Chance: %s%%)", r.rarity, r.name, tostring(r.chance))
+            btn.TextColor3 = C.text
+            btn.TextSize = 11
+            btn.Parent = rewardFrame
+            
+            btn.MouseButton1Click:Connect(function()
+                Wheel.manualTarget = id
+                clearTarget.Text = "Target: " .. r.name
+                clearTarget.TextColor3 = C.accent
+                logToFile("Target set to: " .. r.name)
+            end)
+        end
+        rewardFrame.CanvasSize = UDim2.fromOffset(0, #analysis * 30)
+    end
     
     toggle.MouseButton1Click:Connect(function()
         Wheel.enabled = not Wheel.enabled
         toggle.Text = "Auto Spin: " .. (Wheel.enabled and "ON" or "OFF")
         toggle.TextColor3 = Wheel.enabled and C.green or C.text
     end)
+
+    clearTarget.MouseButton1Click:Connect(function()
+        Wheel.manualTarget = nil
+        clearTarget.Text = "Strategy: Auto"
+        clearTarget.TextColor3 = C.text
+        logToFile("Strategy reset to Auto (Balanced)")
+    end)
+    
+    populateRewards()
     
     task.spawn(function()
         while true do
