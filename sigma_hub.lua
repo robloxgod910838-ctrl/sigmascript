@@ -670,10 +670,7 @@ local function isProduceTreeName(name)
 end
 
 local function isExcludedTreePath(inst)
-	local path = inst:GetFullName()
-	return path:find("%.Decor%.", 1, true) ~= nil
-		or path:find("Robotics Greenery", 1, true) ~= nil
-		or path:find("Lemon Republic", 1, true) ~= nil
+	return inst:GetFullName():find("%.Decor%.", 1, true) ~= nil
 end
 
 local function isDecorTreeInstance(inst)
@@ -698,9 +695,31 @@ local function isFruitTreeInstance(inst)
 	return false
 end
 
-local function isNestedInProduceTree(inst, scanRoot)
+local function isOwnedByOtherPlayer(node)
+	local cur = node
+	while cur and cur ~= workspace do
+		if cur.Name:match("^Tycoon%d$") then
+			local owner = cur:FindFirstChild("Owner")
+			if owner and owner:IsA("ObjectValue") and owner.Value and owner.Value ~= plr then
+				return true
+			end
+			return false
+		end
+		cur = cur.Parent
+	end
+	return false
+end
+
+local function isCollectibleFruitScope(node)
+	if not node or not node.Parent then
+		return false
+	end
+	return not isOwnedByOtherPlayer(node)
+end
+
+local function isNestedInProduceTree(inst)
 	local parent = inst.Parent
-	while parent and parent ~= scanRoot do
+	while parent and parent ~= workspace do
 		if isFruitTreeInstance(parent) and isProduceTreeName(parent.Name) then
 			return true
 		end
@@ -709,24 +728,12 @@ local function isNestedInProduceTree(inst, scanRoot)
 	return false
 end
 
-local function getFruitScanRoot()
-	local tycoonInstance = getTycoonInstance()
-	if tycoonInstance then
-		return tycoonInstance
-	end
-	return nil
-end
-
-local function isOnFruitScanRoot(node, scanRoot)
-	return scanRoot and node and node:IsDescendantOf(scanRoot)
-end
-
-local function resolveFruitTreeRoot(node, scanRoot)
+local function resolveFruitTreeRoot(node)
 	local typedTree
 	local genericTree
 	local fruitModel
 	local cur = node
-	while cur and cur ~= scanRoot do
+	while cur and cur ~= workspace do
 		if cur:IsA("Model") or cur:IsA("Folder") then
 			if isExcludedTreePath(cur) then
 				cur = cur.Parent
@@ -776,7 +783,7 @@ local function ensureTreeGroup(byId, tree, nameCounts)
 	end
 	local baseName = tree.Name
 	nameCounts[baseName] = (nameCounts[baseName] or 0) + 1
-	local path = tree:GetFullName():gsub("^Workspace%.Tycoon%d%.", "")
+	local path = tree:GetFullName():gsub("^Workspace%.", "")
 	local shortPath = getShortPath(path)
 	local label = baseName .. " @ " .. shortPath
 	byId[tree] = {
@@ -789,33 +796,33 @@ local function ensureTreeGroup(byId, tree, nameCounts)
 	return byId[tree]
 end
 
-local function collectFruitFromNode(node, scanRoot, byId, nameCounts)
+local function collectFruitFromNode(node, byId, nameCounts)
 	local cd, prompt, pos = getCollectInteraction(node)
 	if not (cd or prompt) or not pos then
 		return
 	end
-	local tree = resolveFruitTreeRoot(node, scanRoot)
-	if not tree or tree == scanRoot then
+	local tree = resolveFruitTreeRoot(node)
+	if not tree or tree == workspace then
 		return
 	end
 	local group = ensureTreeGroup(byId, tree, nameCounts)
 	table.insert(group.fruits, { fruit = node, cd = cd, prompt = prompt, pos = pos })
 end
 
-local function scanTreeInstance(tree, scanRoot, byId, nameCounts)
+local function scanTreeInstance(tree, byId, nameCounts)
 	ensureTreeGroup(byId, tree, nameCounts)
 	for _, desc in tree:GetDescendants() do
 		if isFruitNode(desc) then
-			collectFruitFromNode(desc, scanRoot, byId, nameCounts)
+			collectFruitFromNode(desc, byId, nameCounts)
 		end
 	end
 end
 
-local function findAllProduceTrees(scanRoot)
+local function findAllProduceTrees()
 	local trees = {}
 	local seen = {}
-	for _, desc in scanRoot:GetDescendants() do
-		if isFruitTreeInstance(desc) and not isNestedInProduceTree(desc, scanRoot) and not seen[desc] then
+	for _, desc in workspace:GetDescendants() do
+		if isCollectibleFruitScope(desc) and isFruitTreeInstance(desc) and not isNestedInProduceTree(desc) and not seen[desc] then
 			seen[desc] = true
 			table.insert(trees, desc)
 		end
@@ -841,29 +848,24 @@ local function countRipeFruitsOnTree(group)
 end
 
 local function refreshTreeGroups()
-	local scanRoot = getFruitScanRoot()
 	local prevCount = #Farm.treeGroups
 	Farm.treeGroups = {}
-	if not scanRoot then
-		Farm.scannedTreeCount = 0
-		return
-	end
 
 	local byId = {}
 	local nameCounts = {}
 
 	for _, fruit in CollectionService:GetTagged("ClickFruit") do
-		if isOnFruitScanRoot(fruit, scanRoot) and fruit.Parent then
-			local tree = resolveFruitTreeRoot(fruit, scanRoot)
-			if tree and tree ~= scanRoot then
+		if isCollectibleFruitScope(fruit) and fruit.Parent then
+			local tree = resolveFruitTreeRoot(fruit)
+			if tree and tree ~= workspace then
 				ensureTreeGroup(byId, tree, nameCounts)
 			end
-			collectFruitFromNode(fruit, scanRoot, byId, nameCounts)
+			collectFruitFromNode(fruit, byId, nameCounts)
 		end
 	end
 
-	for _, tree in findAllProduceTrees(scanRoot) do
-		scanTreeInstance(tree, scanRoot, byId, nameCounts)
+	for _, tree in findAllProduceTrees() do
+		scanTreeInstance(tree, byId, nameCounts)
 	end
 
 	Farm.scannedTreeCount = 0
@@ -896,9 +898,7 @@ local function refreshTreeGroups()
 				.. ripeTreeCount
 				.. " with ripe fruits ("
 				.. fruitCount
-				.. " total) @ "
-				.. scanRoot.Name
-				.. " (full plot)"
+				.. " total) — full map"
 		)
 		for _, group in order do
 			log("  → " .. group.name .. " id=" .. group.treeId .. " ripe=" .. countRipeFruitsOnTree(group))
@@ -994,7 +994,7 @@ end
 local function fruitWaitingStatus()
 	local n = Farm.scannedTreeCount or 0
 	if n > 0 then
-		return "Waiting for fruits… (" .. n .. " trees scanned)"
+		return "Waiting for fruits… (" .. n .. " map trees)"
 	end
 	return "Waiting for fruits…"
 end
@@ -3790,6 +3790,32 @@ local function loadGameModule(entry)
 
 	error("Game script missing — re-run bundle or keep sell_lemons.lua with sigma_hub.lua")
 end
+
+if getgenv().SigmaScriptsRunning then
+	return
+end
+
+if getgenv().SigmaShowHub ~= true then
+	for _, entry in GAMES do
+		if gameWorksHere(entry) then
+			getgenv().SigmaScriptsRunning = true
+			task.spawn(function()
+				local ok, fnOrErr = pcall(loadGameModule, entry)
+				if ok then
+					local runOk, runErr = pcall(fnOrErr)
+					if not runOk then
+						warn("[Sigma Scripts] " .. entry.name .. " error: " .. tostring(runErr))
+					end
+				else
+					warn("[Sigma Scripts] load failed: " .. tostring(fnOrErr))
+				end
+			end)
+			return
+		end
+	end
+end
+
+getgenv().SigmaScriptsRunning = true
 
 local function decodeBase64(data)
 	if type(data) ~= "string" or #data == 0 then
