@@ -1,5 +1,5 @@
 -- Sigma Scripts loader — paste into executor or use autoexec.lua
--- Force hub UI: getgenv().SigmaShowHub = true
+-- Hub shows by default. Skip to game on matching PlaceId: getgenv().SigmaAutoLaunch = true
 -- Reload safely: just run this again (old UI is cleaned up automatically)
 local URL = "https://raw.githubusercontent.com/robloxgod910838-ctrl/sigmascript/refs/heads/main/sigma_hub.lua"
 

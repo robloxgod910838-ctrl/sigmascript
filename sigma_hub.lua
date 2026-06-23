@@ -5084,7 +5084,9 @@ end
 
 getgenv().SigmaStopRequested = false
 
-if getgenv().SigmaShowHub ~= true then
+-- Default: show the Sigma Hub picker. Set getgenv().SigmaAutoLaunch = true to skip straight into
+-- the matching game when you're already on its PlaceId (handy for autoexec).
+if getgenv().SigmaAutoLaunch == true and getgenv().SigmaShowHub ~= true then
 	for _, entry in GAMES do
 		if gameWorksHere(entry) then
 			getgenv().SigmaScriptsRunning = true

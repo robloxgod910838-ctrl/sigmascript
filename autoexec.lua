@@ -1,5 +1,5 @@
 -- Put this in your executor's Auto Execute folder (runs every inject/join)
--- Force hub UI: getgenv().SigmaShowHub = true
+-- Hub shows by default. Skip to game on matching PlaceId: getgenv().SigmaAutoLaunch = true
 local URL = "https://raw.githubusercontent.com/robloxgod910838-ctrl/sigmascript/refs/heads/main/sigma_hub.lua"
 
 local ok, err = pcall(function()
