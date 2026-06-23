@@ -1,5 +1,5 @@
 -- Sigma Scripts — multi-game hub launcher (bundled, keyless)
-local HUB_VERSION = "2026.06.23e"
+local HUB_VERSION = "2026.06.23f"
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -5021,9 +5021,10 @@ local Workspace = game:GetService("Workspace")
 local RS = game:GetService("ReplicatedStorage")
 
 local plr = Players.LocalPlayer
-local SIGMA_VERSION = "2026.06.23-anime5"
+local SIGMA_VERSION = "2026.06.23-anime6"
 
 local WALK_TIMEOUT = 12
+local ROLL_COOLDOWN = 4.5
 local BUY_DELAY = 1.4
 local PLACE_DELAY = 2.5
 local WAVE_DELAY = 8
@@ -5053,6 +5054,7 @@ end)
 
 local State = {
 	autoRoll = false,
+	remoteRoll = true,
 	autoBuy = false,
 	autoPlace = false,
 	autoWave = false,
@@ -5072,6 +5074,8 @@ local State = {
 	lastBPAt = 0,
 	lastBPLevel = 1,
 	lastQuestAt = 0,
+	lastRollCount = nil,
+	remoteRollFails = 0,
 	tick = 0,
 }
 
@@ -5218,6 +5222,31 @@ local function firePrompt(prompt, hold)
 	return ok
 end
 
+local function triggerPromptRemote(prompt)
+	if not prompt or not prompt:IsA("ProximityPrompt") then
+		return false
+	end
+	if firePrompt(prompt, prompt.HoldDuration) then
+		return true
+	end
+	if getconnections then
+		for _, sig in ipairs({ "Triggered", "PromptButtonHoldBegan" }) do
+			local ev = prompt[sig]
+			if ev then
+				for _, conn in getconnections(ev) do
+					if conn.Function then
+						local ok = pcall(conn.Function)
+						if ok then
+							return true
+						end
+					end
+				end
+			end
+		end
+	end
+	return false
+end
+
 local function usePromptInRange(prompt)
 	if not prompt then
 		return false
@@ -5280,23 +5309,72 @@ local function enableServerAutoRoll()
 	end)
 	if ok then
 		State.serverAutoRollOn = true
-		log("Game AutoRoll enabled (server)")
+		log("Server AutoRoll enabled")
 	end
 	local base = getPlayerBase()
 	if not base then
 		return ok
 	end
 	local prompt = findPrompt(base, "AutoRollPrompt")
-	if prompt then
-		if State.walkToRoll and walkToPart(prompt.Parent, prompt.MaxActivationDistance or 10) then
-			usePromptInRange(prompt)
-		elseif usePromptInRange(prompt) then
-			log("AutoRoll prompt fired")
-		else
-			log("Walk to roll machine for AutoRoll")
-		end
+	if prompt and triggerPromptRemote(prompt) then
+		log("AutoRoll prompt (remote)")
 	end
 	return ok
+end
+
+local function tryRemoteRoll()
+	local base = getPlayerBase()
+	if not base then
+		log("No plot — claim a base first")
+		return false
+	end
+
+	local rollPrompt = findPrompt(base, "RollPrompt")
+	if not rollPrompt then
+		log("RollPrompt missing on plot")
+		return false
+	end
+
+	local rollsBefore = tonumber(getData("Rolls", 0)) or 0
+	if State.lastRollCount == nil then
+		State.lastRollCount = rollsBefore
+	end
+
+	local ok = triggerPromptRemote(rollPrompt)
+	State.lastRollAt = os.clock()
+
+	task.delay(1.2, function()
+		local rollsAfter = tonumber(getData("Rolls", rollsBefore)) or rollsBefore
+		if rollsAfter > rollsBefore then
+			State.lastRollCount = rollsAfter
+			State.remoteRollFails = 0
+			log("Roll OK — total " .. tostring(rollsAfter))
+			setStatus("Rolling remotely")
+		elseif ok then
+			State.remoteRollFails += 1
+			if State.remoteRollFails >= 5 then
+				log("Remote roll not confirming — server may need you near machine")
+				State.remoteRollFails = 0
+			end
+		end
+	end)
+
+	if ok then
+		setStatus("Remote roll sent")
+	end
+	return ok
+end
+
+local function tickAutoRoll()
+	enableServerAutoRoll()
+	local now = os.clock()
+	if now - State.lastRollAt < ROLL_COOLDOWN then
+		return false
+	end
+	if State.remoteRoll then
+		return tryRemoteRoll()
+	end
+	return rollOnce()
 end
 
 local function rollOnce()
@@ -5310,6 +5388,10 @@ local function rollOnce()
 	if not rollPrompt then
 		log("RollPrompt not found on plot")
 		return false
+	end
+
+	if State.remoteRoll then
+		return tryRemoteRoll()
 	end
 
 	if State.walkToRoll and not nearPart(rollPrompt.Parent, (rollPrompt.MaxActivationDistance or 10) + 1) then
@@ -5664,7 +5746,7 @@ end
 
 local function runAutomation()
 	if State.autoRoll then
-		enableServerAutoRoll()
+		tickAutoRoll()
 	end
 	if State.autoBuy then
 		tryAutoBuy()
@@ -5989,7 +6071,7 @@ local function buildUI()
 	warn.TextXAlignment = Enum.TextXAlignment.Left
 	warn.TextColor3 = C.yellow
 	warn.TextWrapped = true
-	warn.Text = "Safe mode: no teleport, no FastRoll hack, no premium bypass. Enable ONE toggle at a time. Rejoin if you were kicked before."
+	warn.Text = "Remote Auto Roll fires your plot RollPrompt from anywhere (~4.5s). Watch Rolls stat increase. Turn OFF Remote Roll if you prefer walking."
 	warn.Parent = warnInner
 
 	local logInner = sectionCard(homePage, "Activity log")
@@ -6075,12 +6157,13 @@ local function buildUI()
 		end
 	end
 
-	local farmInner = sectionCard(farmPage, "Automation (safe)")
-	makeToggle(farmInner, "Auto Roll", "Uses game AutoRoll + walks to machine", "autoRoll")
+	local farmInner = sectionCard(farmPage, "Automation")
+	makeToggle(farmInner, "Auto Roll", "Remote roll loop + server AutoRoll", "autoRoll")
+	makeToggle(farmInner, "Remote Roll", "Roll from anywhere (no walking)", "remoteRoll")
 	makeToggle(farmInner, "Auto Buy", "Walks to cheapest unit & buys one", "autoBuy")
 	makeToggle(farmInner, "Auto Place", "One unit per tick when you have tools", "autoPlace")
 	makeToggle(farmInner, "Auto Wave", "Clicks Start UI button", "autoWave")
-	makeToggle(farmInner, "Walk To Roll", "Walk instead of teleport", "walkToRoll")
+	makeToggle(farmInner, "Walk To Roll", "Only when Remote Roll is OFF", "walkToRoll")
 	makeToggle(farmInner, "Walk To Buy", "Walk to shop units on plot", "walkToBuy")
 
 	local bpInner = sectionCard(bpPage, "Battle pass")
