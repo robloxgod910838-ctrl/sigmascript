@@ -28,7 +28,7 @@ local CollectionService = game:GetService("CollectionService")
 local RS = game:GetService("ReplicatedStorage")
 local plr = Players.LocalPlayer
 
-local SIGMA_VERSION = "2026.06.23-ascend3"
+local SIGMA_VERSION = "2026.06.23-trade4"
 
 local LOOP_DELAY = 0.1
 local BUYS_PER_TICK = 8
@@ -2133,26 +2133,27 @@ local Trade = {
 	trough = nil,
 	sessionActive = false,
 	sessionStartAt = 0,
-	COOLDOWN = 1.35,
-	ENDGAME_COOLDOWN = 0.35,
-	POST_SELL_BUY_WAIT = 2.0,
-	WAIT_LOG = 4.0,
-	TICK_INTERVAL = 0.12,
-	NEWS_REFRESH = 0.28,
-	POSITION_LOCK = 0.7,
+	COOLDOWN = 3.25,
+	ENDGAME_COOLDOWN = 0.75,
+	POST_SELL_BUY_WAIT = 4.5,
+	POST_BUY_SELL_WAIT = 3.0,
+	WAIT_LOG = 5.0,
+	TICK_INTERVAL = 0.15,
+	NEWS_REFRESH = 0.35,
+	POSITION_LOCK = 1.0,
 	BUF = 24,
-	RISE_MIN = 3,
-	CRASH = 0.07,
+	RISE_MIN = 4,
+	CRASH = 0.08,
 	MA = 5,
-	NET_THRESHOLD = 1.0,
-	NEUTRAL_BAND = 1.0,
+	NET_THRESHOLD = 1.25,
+	NEUTRAL_BAND = 1.25,
 	LATEST_BOOST = 3.0,
 	ENDGAME_ELAPSED = 42,
 	ENDGAME_LINE_T = 48,
 	CRITICAL_ELAPSED = 52,
 	CRITICAL_LINE_T = 55,
-	FORCE_SELL_DROP = 0.035,
-	FORCE_SELL_PEAK_DROP = 0.05,
+	FORCE_SELL_DROP = 0.06,
+	FORCE_SELL_PEAK_DROP = 0.08,
 }
 
 local function resetTradeSessionState()
@@ -2466,55 +2467,66 @@ local function shouldForceEndgameSell(ui, price, px, sessionEnding, sessionCriti
 	if sessionCritical then
 		return true, "critical — must exit position"
 	end
-	if sessionEnding then
-		return true, "session ending — take profits"
-	end
 	if isAtMaxEarnings(ui) then
 		return true, "max earnings reached"
 	end
 	if price <= 0.05 then
 		return true, "price near zero"
 	end
-	if px.sharpCrash or px.recentDropPct >= Trade.FORCE_SELL_DROP then
-		return true, string.format("price drop %.0f%%", px.recentDropPct * 100)
-	end
-	if px.dropFromPositionPeak >= Trade.FORCE_SELL_PEAK_DROP then
-		return true, string.format("position peak drop %.0f%%", px.dropFromPositionPeak * 100)
-	end
-	if px.fallingHard and px.recentDropPct >= 0.02 then
-		return true, "hard fall"
-	end
-	if px.atLocalPeak then
-		return true, "local peak"
-	end
 	return false, nil
 end
 
-local function decideSellAction(news, px, forceSell, forceReason, sessionCritical)
+local function decideSellAction(news, px, forceSell, forceReason, sessionCritical, sessionEnding, now)
 	if forceSell then
 		return true, forceReason or "protect position"
 	end
-	if sessionCritical then
-		return true, "critical exit"
+
+	local postBuyBlock = Trade.lastBuyAt > 0
+		and now - Trade.lastBuyAt < Trade.POST_BUY_SELL_WAIT
+	if postBuyBlock then
+		if news.latestUrgentBear or (news.latestBearish and news.redBreaking) then
+			return true, "urgent bear overrides hold"
+		end
+		return false, nil
 	end
+
+	if news.latestBullish and not sessionCritical and not sessionEnding then
+		return false, nil
+	end
+
 	if news.latestUrgentBear or (news.latestBearish and news.redBreaking) then
 		return true, "urgent bear headline"
 	end
 	if news.latestBearish then
-		return true, "latest bearish"
+		return true, "latest bearish headline"
 	end
-	if news.bearScore > news.bullScore + 0.5 then
-		return true, "net bearish"
+	if news.bearScore > news.bullScore + Trade.NET_THRESHOLD then
+		return true, "net bearish news"
 	end
-	if px.sharpCrash then
-		return true, "sharp crash"
+
+	if sessionEnding or sessionCritical then
+		if news.majorityBearish or news.latestBearish then
+			return true, "endgame + bearish news"
+		end
+		if px.recentDropPct >= Trade.FORCE_SELL_DROP and news.bearScore >= news.bullScore then
+			return true, string.format("endgame + drop %.0f%%", px.recentDropPct * 100)
+		end
+		if px.dropFromPositionPeak >= Trade.FORCE_SELL_PEAK_DROP then
+			return true, string.format("endgame + peak drop %.0f%%", px.dropFromPositionPeak * 100)
+		end
+		if sessionCritical then
+			return true, "critical exit"
+		end
+		return false, nil
 	end
-	if px.fallingHard and px.recentDropPct >= 0.025 then
-		return true, "falling price"
+
+	if px.sharpCrash and news.latestBearish then
+		return true, "crash + bearish headline"
 	end
-	if px.atLocalPeak and px.falls >= 1 then
-		return true, "local peak turn"
+	if px.sharpCrash and news.bearScore > news.bullScore + Trade.NET_THRESHOLD then
+		return true, "crash + net bearish"
 	end
+
 	return false, nil
 end
 
@@ -2522,28 +2534,20 @@ local function decideBuyAction(news, px, now, sessionEnding, sessionCritical)
 	if sessionEnding or sessionCritical then
 		return false, nil
 	end
-	local postSellBlock = Trade.lastSellAt > 0
-		and now - Trade.lastSellAt < Trade.POST_SELL_BUY_WAIT
-	if postSellBlock then
+	if Trade.lastSellAt > 0 and now - Trade.lastSellAt < Trade.POST_SELL_BUY_WAIT then
 		return false, nil
 	end
 	if news.latestBearish or news.latestUrgentBear or news.majorityBearish then
 		return false, nil
 	end
-	if px.atLocalPeak and not news.latestBullish then
+	if px.atLocalPeak then
 		return false, nil
 	end
-	if news.bullScore > news.bearScore + Trade.NET_THRESHOLD and news.latestBullish then
+	if news.latestBullish and news.bullScore > news.bearScore + Trade.NET_THRESHOLD then
 		return true, "bullish news + green latest"
 	end
 	if news.latestBullish and news.greenBreaking and news.bullScore >= news.bearScore then
-		return true, "green breaking"
-	end
-	if news.newsNeutral and px.risingHard and px.belowMA and news.bullScore > 0 then
-		return true, "neutral rise at/below MA"
-	end
-	if news.newsNeutral and px.atLocalBottom and px.momentum > 0 then
-		return true, "local bottom"
+		return true, "green breaking headline"
 	end
 	return false, nil
 end
@@ -2748,7 +2752,10 @@ local function startTradeHelper()
 		local news = getCachedNews(ui, now)
 		local px = getPriceContext(price)
 		local forceSell, forceReason = shouldForceEndgameSell(ui, price, px, sessionEnding, sessionCritical)
-		local cooldown = (forceSell or sessionCritical) and Trade.ENDGAME_COOLDOWN or Trade.COOLDOWN
+		local cooldown = Trade.COOLDOWN
+		if sessionCritical and holdingCrypto then
+			cooldown = Trade.ENDGAME_COOLDOWN
+		end
 
 		if not canTrade and not (forceSell and holdingCrypto) then
 			return
@@ -2760,7 +2767,7 @@ local function startTradeHelper()
 		local action, reason
 		if holdingCrypto then
 			local shouldSell
-			shouldSell, reason = decideSellAction(news, px, forceSell, forceReason, sessionCritical)
+			shouldSell, reason = decideSellAction(news, px, forceSell, forceReason, sessionCritical, sessionEnding, now)
 			if shouldSell then
 				action = "sell"
 			end
@@ -2777,9 +2784,11 @@ local function startTradeHelper()
 		elseif now - Trade.lastWaitLogAt >= Trade.WAIT_LOG then
 			Trade.lastWaitLogAt = now
 			local posTag = holdingCrypto and "IN" or "OUT"
+			local headline = news.latestHeader or "no headline"
 			log(string.format(
-				"Trade: waiting (%s) — bull %.1f bear %.1f trend %d%s",
+				"Trade: waiting (%s) [%s] bull %.1f bear %.1f trend %d%s",
 				posTag,
+				headline,
 				news.bullScore,
 				news.bearScore,
 				Trade.trend,
@@ -3355,12 +3364,43 @@ end
 getgenv().SigmaStopRequested = false
 Farm.running = true
 
+local GUI_DISPLAY_FLOOR = 1000000
+
 local gui = Instance.new("ScreenGui")
 gui.Name = "SellLemons"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.DisplayOrder = GUI_DISPLAY_FLOOR
 gui.Parent = plr:WaitForChild("PlayerGui")
+
+local function ensureHubOnTop()
+	if not gui or not gui.Parent then
+		return
+	end
+	local order = GUI_DISPLAY_FLOOR
+	for _, child in plr.PlayerGui:GetChildren() do
+		if child:IsA("ScreenGui") and child ~= gui and child.Enabled then
+			order = math.max(order, (child.DisplayOrder or 0) + 1)
+		end
+	end
+	gui.DisplayOrder = math.min(order, 2147483647)
+end
+
+ensureHubOnTop()
+plr.PlayerGui.ChildAdded:Connect(function(child)
+	if child:IsA("ScreenGui") and child ~= gui then
+		child:GetPropertyChangedSignal("DisplayOrder"):Connect(ensureHubOnTop)
+		child:GetPropertyChangedSignal("Enabled"):Connect(ensureHubOnTop)
+		task.defer(ensureHubOnTop)
+	end
+end)
+for _, child in plr.PlayerGui:GetChildren() do
+	if child:IsA("ScreenGui") and child ~= gui then
+		child:GetPropertyChangedSignal("DisplayOrder"):Connect(ensureHubOnTop)
+		child:GetPropertyChangedSignal("Enabled"):Connect(ensureHubOnTop)
+	end
+end
 
 local glow = Instance.new("Frame")
 glow.Size = UDim2.fromOffset(720, 560)
@@ -4902,6 +4942,7 @@ heartbeatConn = RunService.Heartbeat:Connect(function(dt)
 		UI.footerStatus.Text = Farm.lastAction
 		refreshUI()
 		refreshAscensionUI()
+		ensureHubOnTop()
 
 		Farm.tick += 1
 		if Farm.autoFruit and Farm.tick % 120 == 0 then
