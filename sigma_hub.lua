@@ -28,7 +28,7 @@ local CollectionService = game:GetService("CollectionService")
 local RS = game:GetService("ReplicatedStorage")
 local plr = Players.LocalPlayer
 
-local SIGMA_VERSION = "2026.06.23-trade5"
+local SIGMA_VERSION = "2026.06.23-trade6"
 
 local LOOP_DELAY = 0.1
 local BUYS_PER_TICK = 8
@@ -2133,14 +2133,14 @@ local Trade = {
 	trough = nil,
 	sessionActive = false,
 	sessionStartAt = 0,
-	COOLDOWN = 2.25,
-	ENDGAME_COOLDOWN = 0.6,
-	POST_SELL_BUY_WAIT = 3.0,
-	POST_BUY_SELL_WAIT = 2.0,
-	WAIT_LOG = 4.0,
-	TICK_INTERVAL = 0.12,
-	NEWS_REFRESH = 0.3,
-	POSITION_LOCK = 0.85,
+	COOLDOWN = 1.5,
+	ENDGAME_COOLDOWN = 0.5,
+	POST_SELL_BUY_WAIT = 2.5,
+	POST_BUY_SELL_WAIT = 1.5,
+	WAIT_LOG = 3.5,
+	TICK_INTERVAL = 0.1,
+	NEWS_REFRESH = 0.25,
+	POSITION_LOCK = 0.75,
 	BUF = 24,
 	RISE_MIN = 3,
 	CRASH = 0.07,
@@ -2198,12 +2198,23 @@ local function isHoldingCrypto(ui)
 	return crypto > cash
 end
 
-local function getTradeButtonIntent(ui)
+local function getTradeButtonText(ui)
 	local btn = ui._TradeButton and ui._TradeButton.Gui
 	if not btn then
-		return nil
+		return ""
 	end
-	local title = string.upper(btn.Title.Text or "")
+	if btn:IsA("TextButton") and btn.Text ~= "" then
+		return btn.Text
+	end
+	local title = btn:FindFirstChild("Title", true)
+	if title and title:IsA("TextLabel") then
+		return title.Text or ""
+	end
+	return btn.Text or ""
+end
+
+local function getTradeButtonIntent(ui)
+	local title = string.upper(getTradeButtonText(ui))
 	if string.find(title, "SELL", 1, true) then
 		return "sell"
 	end
@@ -2226,7 +2237,28 @@ local function getCachedNews(ui, now)
 	if Trade.cachedNews and now - Trade.lastNewsScanAt < Trade.NEWS_REFRESH then
 		return Trade.cachedNews
 	end
-	Trade.cachedNews = analyzeNewsSentiment(ui)
+	local ok, news = pcall(analyzeNewsSentiment, ui)
+	if ok and news then
+		Trade.cachedNews = news
+	else
+		Trade.cachedNews = {
+			bullScore = 0,
+			bearScore = 0,
+			netScore = 0,
+			redBreaking = false,
+			greenBreaking = false,
+			latestHeader = nil,
+			latestSentiment = nil,
+			latestBearish = false,
+			latestBullish = false,
+			latestUrgentBear = false,
+			majorityBearish = false,
+			majorityBullish = false,
+			newsNeutral = true,
+			newsCount = 0,
+			headlines = {},
+		}
+	end
 	Trade.lastNewsScanAt = now
 	return Trade.cachedNews
 end
@@ -2314,8 +2346,14 @@ local function analyzeNewsSentiment(ui)
 				continue
 			end
 
+			local visualY = 0
+			if child:IsA("GuiObject") then
+				visualY = child.AbsolutePosition.Y
+			end
+
 			table.insert(headlines, {
 				layoutOrder = child.LayoutOrder,
+				visualY = visualY,
 				headerText = header.Text,
 				sentiment = classifyNewsColor(header.TextColor3),
 				tagWeight = newsTagWeight(header.Text),
@@ -2323,7 +2361,11 @@ local function analyzeNewsSentiment(ui)
 		end
 	end
 
+	-- Prefer top-of-panel headline (smallest Y); fall back to lowest LayoutOrder
 	table.sort(headlines, function(a, b)
+		if a.visualY > 0 and b.visualY > 0 and math.abs(a.visualY - b.visualY) > 2 then
+			return a.visualY < b.visualY
+		end
 		return a.layoutOrder < b.layoutOrder
 	end)
 
@@ -2424,7 +2466,11 @@ local function countConsecutiveMoves(prices)
 end
 
 local function isTradeLineActive(ui)
-	return ui._LineConn ~= nil and ui._LastLineValue ~= nil
+	if ui._LineConn ~= nil then
+		return true
+	end
+	local price = ui._LastLineValue
+	return type(price) == "number" and price > 0
 end
 
 local function getTradeTiming(ui)
@@ -2486,59 +2532,24 @@ local function decideSellAction(news, px, forceSell, forceReason, sessionCritica
 	if forceSell then
 		return true, forceReason or "protect position"
 	end
-
-	local postBuyBlock = Trade.lastBuyAt > 0
-		and now - Trade.lastBuyAt < Trade.POST_BUY_SELL_WAIT
-	if postBuyBlock then
-		if news.latestUrgentBear or (news.latestBearish and news.redBreaking) then
-			return true, "urgent bear overrides hold"
-		end
-		return false, nil
-	end
-
-	-- Primary: bearish news
 	if news.latestUrgentBear or (news.latestBearish and news.redBreaking) then
 		return true, "urgent bear headline"
 	end
 	if news.latestBearish then
 		return true, "latest bearish headline"
 	end
-	if news.bearScore > news.bullScore + Trade.NET_THRESHOLD then
+	if news.bearScore > news.bullScore then
 		return true, "net bearish news"
 	end
-
-	-- Hold winners while headline is green and price still climbing
-	if news.latestBullish and px.risingHard and not px.atLocalPeak and not sessionEnding then
-		return false, nil
+	if px.sharpCrash and news.bearScore > 0 then
+		return true, "crash + bearish news"
 	end
-
-	-- Price exits when news is not strongly bullish
-	local strongBull = news.latestBullish and news.bullScore > news.bearScore + 1.5
-	if px.atLocalPeak and not strongBull then
-		return true, "local peak — take profit"
+	if news.newsNeutral and px.sharpCrash and px.fallingHard then
+		return true, "neutral news — price crash"
 	end
-	if px.fallingHard and px.recentDropPct >= 0.03 and not strongBull then
-		return true, string.format("falling %.0f%%", px.recentDropPct * 100)
+	if sessionEnding and px.dropFromPositionPeak >= 0.04 then
+		return true, "endgame peak giveback"
 	end
-	if px.dropFromPositionPeak >= 0.045 and not strongBull then
-		return true, string.format("peak giveback %.0f%%", px.dropFromPositionPeak * 100)
-	end
-	if px.sharpCrash and news.bearScore >= news.bullScore then
-		return true, "sharp crash"
-	end
-
-	-- Neutral news tiebreaker: exit on clear downturn
-	if news.newsNeutral and px.fallingHard and px.recentDropPct >= 0.025 then
-		return true, "neutral news — price falling"
-	end
-
-	if news.newsCount == 0 and px.atLocalPeak then
-		return true, "peak (no headlines)"
-	end
-	if news.newsCount == 0 and px.fallingHard and px.recentDropPct >= 0.035 then
-		return true, "falling (no headlines)"
-	end
-
 	return false, nil
 end
 
@@ -2546,7 +2557,10 @@ local function decideBuyAction(news, px, now, sessionEnding, sessionCritical)
 	if sessionEnding or sessionCritical then
 		return false, nil
 	end
-	if Trade.lastSellAt > 0 and now - Trade.lastSellAt < Trade.POST_SELL_BUY_WAIT then
+	local postSellBlock = Trade.lastSellAt > 0
+		and now - Trade.lastSellAt < Trade.POST_SELL_BUY_WAIT
+		and not (news.latestBullish and news.bullScore > news.bearScore + Trade.NET_THRESHOLD)
+	if postSellBlock then
 		return false, nil
 	end
 	if news.latestBearish or news.latestUrgentBear then
@@ -2555,33 +2569,18 @@ local function decideBuyAction(news, px, now, sessionEnding, sessionCritical)
 	if news.majorityBearish and not news.latestBullish then
 		return false, nil
 	end
-	if px.atLocalPeak and not news.latestBullish then
-		return false, nil
-	end
-
-	-- Primary: bullish news
-	if news.latestBullish and news.bullScore >= news.bearScore then
-		return true, "green latest headline"
-	end
-	if news.greenBreaking and news.bullScore >= news.bearScore then
-		return true, "green breaking headline"
-	end
 	if news.bullScore > news.bearScore + Trade.NET_THRESHOLD and news.latestBullish then
 		return true, "net bullish + green latest"
 	end
-
-	-- Neutral news: buy dips on confirmed rise only
-	if news.newsNeutral and px.risingHard and px.belowMA and px.momentum > 0 then
-		return true, "neutral news — rise from dip"
+	if news.latestBullish and news.greenBreaking and news.bullScore >= news.bearScore then
+		return true, "green breaking headline"
 	end
-	if news.newsNeutral and px.atLocalBottom and px.momentum > 0 and px.rises >= 2 then
-		return true, "neutral news — local bottom"
+	if news.newsNeutral and px.risingHard and news.bullScore > 0 then
+		return true, "neutral news — rising price"
 	end
-
-	if news.newsCount == 0 and px.atLocalBottom and px.risingHard then
-		return true, "bottom bounce (no headlines)"
+	if news.newsNeutral and px.momentum > 0.005 and news.latestBullish then
+		return true, "neutral news — momentum"
 	end
-
 	return false, nil
 end
 
@@ -2589,19 +2588,26 @@ local function executeTradeAction(ui, now, action, reason, news, holding, price)
 	if now < Trade.positionLockUntil then
 		return false
 	end
-	local intent = getTradeButtonIntent(ui)
-	if action == "sell" and intent ~= "sell" then
+	if action == "sell" and not holding then
 		return false
 	end
-	if action == "buy" and intent ~= "buy" then
+	if action == "buy" and holding then
 		return false
 	end
-	local ok = pcall(function()
+
+	local traded = false
+	pcall(function()
 		ui:Trade()
+		traded = true
 	end)
-	if not ok then
+	if not traded and ui._TradeButton and ui._TradeButton.Gui then
+		traded = fireGuiButton(ui._TradeButton.Gui)
+	end
+	if not traded then
+		log("Trade: failed to click " .. string.upper(action))
 		return false
 	end
+
 	Trade.lastAt = now
 	Trade.positionLockUntil = now + Trade.POSITION_LOCK
 	if action == "buy" then
@@ -2727,18 +2733,19 @@ local function startTradeHelper()
 
 		if not lineRunning then
 			if Trade.sessionActive then
-				if getTradePosition(ui) and canTrade and os.clock() >= Trade.positionLockUntil then
+				if isHoldingCrypto(ui) and os.clock() >= Trade.positionLockUntil then
 					pcall(function()
-						if getTradeButtonIntent(ui) == "sell" then
-							ui:Trade()
-							log("Trade: emergency sell at line stop")
-						end
+						ui:Trade()
 					end)
+					if ui._TradeButton and ui._TradeButton.Gui then
+						fireGuiButton(ui._TradeButton.Gui)
+					end
+					log("Trade: emergency sell at line stop")
 				end
 				local now = os.clock()
 				if now - Trade.lastSessionEndLogAt >= 2 then
 					Trade.lastSessionEndLogAt = now
-					if getTradePosition(ui) then
+					if isHoldingCrypto(ui) then
 						log("Trade: line stopped while still IN")
 					else
 						log("Trade: session ended (line stopped)")
@@ -2756,7 +2763,7 @@ local function startTradeHelper()
 		end
 
 		local now = os.clock()
-		local holdingCrypto = getTradePosition(ui)
+		local holdingCrypto = isHoldingCrypto(ui)
 
 		if holdingCrypto then
 			Trade.peak = Trade.peak and math.max(Trade.peak, price) or price
@@ -2790,8 +2797,19 @@ local function startTradeHelper()
 			cooldown = Trade.ENDGAME_COOLDOWN
 		end
 
-		if not canTrade and not (forceSell and holdingCrypto) then
-			return
+		if not canTrade then
+			if now - Trade.lastWaitLogAt >= Trade.WAIT_LOG then
+				Trade.lastWaitLogAt = now
+				log(string.format(
+					"Trade: waiting (button inactive) — trend %d rises %d falls %d",
+					Trade.trend,
+					Trade.rises,
+					Trade.falls
+				))
+			end
+			if not (forceSell and holdingCrypto) then
+				return
+			end
 		end
 		if now - Trade.lastAt < cooldown then
 			return
