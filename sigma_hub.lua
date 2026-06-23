@@ -28,6 +28,8 @@ local CollectionService = game:GetService("CollectionService")
 local RS = game:GetService("ReplicatedStorage")
 local plr = Players.LocalPlayer
 
+local SIGMA_VERSION = "2026.06.23-ascend"
+
 local LOOP_DELAY = 0.1
 local BUYS_PER_TICK = 8
 local PHONE_RAISE_COUNT = 1
@@ -3755,6 +3757,7 @@ refreshUpgradePresetButtons()
 
 makeToggle(farmInner, "Auto Cash Drops", "Collects cash bags", "autoCashDrop", "💵")
 local rebirthToggleDetail = makeToggle(farmInner, "Auto Rebirth", rebirthDescText(), "autoRebirth", "🔄")
+makeToggle(farmInner, "Auto Ascend", "Ascends when all tycoon upgrades are bought", "autoAscend", "🚀")
 
 local rebirthMultCard = Instance.new("Frame")
 rebirthMultCard.Size = UDim2.new(1, 0, 0, 44)
@@ -3832,8 +3835,6 @@ UI.rebirthMultBox:GetPropertyChangedSignal("Text"):Connect(function()
 	end
 end)
 
-makeToggle(farmInner, "Auto Ascend", "Ascends when all upgrades are purchased", "autoAscend", "⬆️")
-
 makeToggle(farmInner, "Auto Phone Offers", "Raises once then accepts", "autoPhone", "📱")
 
 local function applyConfigData(data)
@@ -3886,7 +3887,7 @@ local function makeActionBtn(text, color, callback)
 end
 
 makeActionBtn("▶  Enable All Farm", C.accentDim, function()
-	for _, key in ipairs({ "autoComplete", "autoFruit", "autoUpgrade", "autoCashDrop", "autoPhone" }) do
+	for _, key in ipairs({ "autoComplete", "autoFruit", "autoUpgrade", "autoCashDrop", "autoRebirth", "autoAscend", "autoPhone" }) do
 		setFeature(key, true)
 	end
 	setStatus("All farm features running")
@@ -4151,7 +4152,7 @@ aboutText.TextXAlignment = Enum.TextXAlignment.Left
 aboutText.TextYAlignment = Enum.TextYAlignment.Top
 aboutText.TextColor3 = C.muted
 aboutText.TextWrapped = true
-aboutText.Text = "Sigma Scripts · Sell Lemons module.\nRightControl toggles UI visibility.\nInfo → Configs saves toggles & multipliers.\nEach toggle runs on Heartbeat until turned off."
+aboutText.Text = ("Sigma Scripts · Sell Lemons v%s\nRightControl toggles UI visibility.\nFarm tab: Auto Ascend is below Auto Rebirth.\nInfo → Configs saves toggles & multipliers."):format(SIGMA_VERSION)
 aboutText.Parent = aboutInner
 
 local teleportCount = 0
