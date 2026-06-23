@@ -1,4 +1,5 @@
 -- Sigma Scripts — multi-game hub launcher (bundled, keyless)
+local HUB_VERSION = "2026.06.23b"
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -6158,12 +6159,28 @@ local function statusColor(status)
 end
 
 local function gameWorksHere(entry)
+	local here = tostring(game.PlaceId)
 	for _, id in entry.placeIds do
-		if game.PlaceId == id then
+		if here == tostring(id) then
 			return true
 		end
 	end
 	return false
+end
+
+local function getSortedGames()
+	local here, other = {}, {}
+	for _, entry in GAMES do
+		if gameWorksHere(entry) then
+			table.insert(here, entry)
+		else
+			table.insert(other, entry)
+		end
+	end
+	for _, entry in other do
+		table.insert(here, entry)
+	end
+	return here
 end
 
 local function tryReadfile(filename)
@@ -6756,7 +6773,7 @@ local function launchGame(entry, cardSub)
 	end
 end
 
-for _, entry in GAMES do
+for _, entry in getSortedGames() do
 	local card = Instance.new("TextButton")
 	card.Size = UDim2.new(1, 0, 0, 88)
 	card.BackgroundColor3 = C.card
@@ -6814,7 +6831,12 @@ for _, entry in GAMES do
 	sub.TextYAlignment = Enum.TextYAlignment.Top
 	sub.TextWrapped = true
 	sub.TextColor3 = C.muted
-	sub.Text = entry.subtitle or ""
+	if gameWorksHere(entry) then
+		sub.Text = (entry.subtitle or "") .. " · you're here"
+		sub.TextColor3 = C.green
+	else
+		sub.Text = entry.subtitle or ""
+	end
 	sub.Parent = card
 
 	local dot = Instance.new("Frame")
@@ -6891,7 +6913,26 @@ task.delay(2, function()
 	TweenService:Create(splash, TweenInfo.new(0.55), { BackgroundTransparency = 1 }):Play()
 	task.wait(0.55)
 	splash:Destroy()
-	picker.Visible = true
+
+	local matched
+	for _, entry in GAMES do
+		if gameWorksHere(entry) then
+			matched = entry
+			break
+		end
+	end
+
+	if matched then
+		statusMsg.Text = "Auto-loading " .. matched.name .. "..."
+		statusMsg.TextColor3 = C.muted
+		picker.Visible = true
+		launchGame(matched, statusMsg)
+		if hubActive and gui.Parent then
+			picker.Visible = true
+		end
+	else
+		picker.Visible = true
+	end
 end)
 
 while hubActive and gui.Parent do
