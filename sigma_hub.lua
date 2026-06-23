@@ -19,7 +19,7 @@ local C = {
 }
 
 local EMBEDDED = {
-	sell_lemons = [=[-- Sell Lemons — Sigma Scripts game module (refactored Lemon Hub)
+	sell_lemons    = [=[-- Sell Lemons — Sigma Scripts game module (refactored Lemon Hub)
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -5012,6 +5012,860 @@ end
 
 getgenv().SigmaScriptsRunning = nil
 ]=],
+	candy_escape   = [=[-- Candy & Chocolate Keyboard Escape — Sigma Scripts game module
+-- Game: [UPD] +1 Speed Keyboard Escape | Candy & Chocolate (PlaceId 95082159892680)
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local plr = Players.LocalPlayer
+
+local CANDY_VERSION = "2026.06.23-v1"
+local PLACE_ID = 95082159892680
+
+-- Verify game
+if game.PlaceId ~= PLACE_ID then
+	warn("[CandyEscape] Wrong game — expected PlaceId " .. PLACE_ID)
+end
+
+-- ── Remote references ──────────────────────────────────────────────────────
+local Remotes = game:GetService("ReplicatedStorage"):WaitForChild("Remotes", 5)
+local function remote(name)
+	return Remotes and Remotes:FindFirstChild(name)
+end
+
+-- ── State ──────────────────────────────────────────────────────────────────
+local S = {
+	speedHack   = false,
+	speedVal    = 300,
+	fly         = false,
+	flySpeed    = 80,
+	noclip      = false,
+	infiniteJump= false,
+	antiVoid    = false,
+	autoWin     = false,
+	autoWinDelay= 1.5,
+	autoRebirth = false,
+	running     = true,
+	logLines    = {},
+}
+
+-- ── Helpers ────────────────────────────────────────────────────────────────
+local function getChar()
+	return plr.Character or plr.CharacterAdded:Wait()
+end
+local function getHRP()
+	local c = plr.Character
+	return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function getHum()
+	local c = plr.Character
+	return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+-- ── Fly implementation ─────────────────────────────────────────────────────
+local flyBV, flyConn
+local function startFly()
+	local c = getChar()
+	local hrp = getHRP()
+	if not hrp then return end
+
+	local bv = Instance.new("BodyVelocity")
+	bv.Name = "SigmaFlyBV"
+	bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+	bv.Velocity = Vector3.zero
+	bv.Parent = hrp
+	flyBV = bv
+
+	local bg = Instance.new("BodyGyro")
+	bg.Name = "SigmaFlyBG"
+	bg.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+	bg.P = 1e4
+	bg.D = 100
+	bg.CFrame = hrp.CFrame
+	bg.Parent = hrp
+
+	local hum = getHum()
+	if hum then
+		hum.PlatformStand = true
+	end
+
+	flyConn = RunService.Heartbeat:Connect(function()
+		if not S.fly or not hrp.Parent then
+			return
+		end
+		local cam = workspace.CurrentCamera
+		local cf = cam.CFrame
+		local vel = Vector3.zero
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+			vel = vel + cf.LookVector
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+			vel = vel - cf.LookVector
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+			vel = vel - cf.RightVector
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+			vel = vel + cf.RightVector
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+			vel = vel + Vector3.new(0, 1, 0)
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+			vel = vel - Vector3.new(0, 1, 0)
+		end
+		if vel.Magnitude > 0 then
+			bv.Velocity = vel.Unit * S.flySpeed
+		else
+			bv.Velocity = Vector3.zero
+		end
+		bg.CFrame = CFrame.new(hrp.Position, hrp.Position + cf.LookVector)
+	end)
+end
+
+local function stopFly()
+	if flyConn then
+		flyConn:Disconnect()
+		flyConn = nil
+	end
+	local hrp = getHRP()
+	if hrp then
+		local bv = hrp:FindFirstChild("SigmaFlyBV")
+		if bv then bv:Destroy() end
+		local bg = hrp:FindFirstChild("SigmaFlyBG")
+		if bg then bg:Destroy() end
+	end
+	local hum = getHum()
+	if hum then
+		hum.PlatformStand = false
+	end
+end
+
+-- ── Noclip implementation ──────────────────────────────────────────────────
+local noclipConn
+local function startNoclip()
+	noclipConn = RunService.Stepped:Connect(function()
+		if not S.noclip then return end
+		local c = plr.Character
+		if not c then return end
+		for _, p in ipairs(c:GetDescendants()) do
+			if p:IsA("BasePart") and p.CanCollide then
+				p.CanCollide = false
+			end
+		end
+	end)
+end
+local function stopNoclip()
+	if noclipConn then
+		noclipConn:Disconnect()
+		noclipConn = nil
+	end
+	-- restore collision
+	local c = plr.Character
+	if c then
+		for _, p in ipairs(c:GetDescendants()) do
+			if p:IsA("BasePart") then
+				p.CanCollide = true
+			end
+		end
+	end
+end
+
+-- ── Speed hack ─────────────────────────────────────────────────────────────
+local speedConn
+local function startSpeedHack()
+	speedConn = RunService.Heartbeat:Connect(function()
+		if not S.speedHack then return end
+		local hum = getHum()
+		if hum and hum.WalkSpeed ~= S.speedVal then
+			hum.WalkSpeed = S.speedVal
+		end
+	end)
+end
+
+-- ── Infinite jump ──────────────────────────────────────────────────────────
+local jumpConn
+local function startInfiniteJump()
+	jumpConn = UserInputService.JumpRequest:Connect(function()
+		if not S.infiniteJump then return end
+		local hum = getHum()
+		if hum then
+			hum:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end)
+end
+
+-- ── Anti-void ──────────────────────────────────────────────────────────────
+local SAFE_Y = 10
+local lastSafePos = nil
+local antiVoidConn
+local function startAntiVoid()
+	antiVoidConn = RunService.Heartbeat:Connect(function()
+		if not S.antiVoid then return end
+		local hrp = getHRP()
+		if not hrp then return end
+		if hrp.Position.Y > -50 and hrp.Position.Y < 2000 then
+			lastSafePos = hrp.CFrame
+		elseif hrp.Position.Y <= -50 or hrp.Position.Y > 2000 then
+			if lastSafePos then
+				hrp.CFrame = lastSafePos
+			else
+				hrp.CFrame = CFrame.new(0, SAFE_Y, 0)
+			end
+		end
+	end)
+end
+
+-- ── Stage positions (discovered via MCP spy) ───────────────────────────────
+-- Stages in order: HUB → Stage1 → Stage2 → ... → Stage15 → Level15
+local STAGE_SPAWNS = {
+	{ name = "HUB (Stage 0)",   pos = Vector3.new(0,    7,    0)       },
+	{ name = "Stage 1",         pos = Vector3.new(-23,  25,   110)     },
+	{ name = "Stage 2",         pos = Vector3.new(2,    8,    282)     },
+	{ name = "Stage 3",         pos = Vector3.new(2,    8,    507)     },
+}
+
+-- Win-trigger blocks discovered in workspace
+local WIN_BLOCKS = {
+	Vector3.new(-16.5,  8,  285),   -- WinBlock1 (end of Stage 1)
+	Vector3.new(-16.5,  8,  507),   -- WinBlock2 (end of Stage 2)
+}
+
+local function findWinBlocks()
+	-- dynamically find all WinBlock parts
+	local found = {}
+	local structure = workspace:FindFirstChild("Structure")
+	if structure then
+		for _, v in ipairs(structure:GetDescendants()) do
+			if v:IsA("BasePart") and v.Name:find("Win") then
+				table.insert(found, v.Position + Vector3.new(0, 3, 0))
+			end
+		end
+	end
+	if #found > 0 then return found end
+	return WIN_BLOCKS
+end
+
+-- ── Auto-win ───────────────────────────────────────────────────────────────
+local function doSingleWin()
+	local hrp = getHRP()
+	if not hrp then return end
+	local blocks = findWinBlocks()
+	if #blocks == 0 then return end
+	-- Teleport to first WinBlock
+	local target = blocks[1]
+	hrp.CFrame = CFrame.new(target)
+	task.wait(0.25)
+	-- Teleport back to HUB so the stage resets properly
+	hrp.CFrame = CFrame.new(0, 7, 0)
+end
+
+local autoWinThread
+local function startAutoWin()
+	autoWinThread = task.spawn(function()
+		while S.autoWin and S.running do
+			pcall(doSingleWin)
+			task.wait(math.max(0.5, S.autoWinDelay))
+		end
+	end)
+end
+
+-- ── Auto-rebirth ───────────────────────────────────────────────────────────
+local function tryRebirth()
+	local rem = remote("Rebirth")
+	if rem then
+		pcall(function() rem:FireServer() end)
+	end
+end
+
+local autoRebirthThread
+local function startAutoRebirth()
+	autoRebirthThread = task.spawn(function()
+		while S.autoRebirth and S.running do
+			pcall(tryRebirth)
+			task.wait(3)
+		end
+	end)
+end
+
+-- ── TP helpers ─────────────────────────────────────────────────────────────
+local function tpToStage(stageIndex)
+	local hrp = getHRP()
+	if not hrp then return end
+	local entry = STAGE_SPAWNS[stageIndex]
+	if entry then
+		hrp.CFrame = CFrame.new(entry.pos + Vector3.new(0, 3, 0))
+	end
+end
+
+local function tpToLastStage()
+	-- Find the furthest reachable stage (Stage15)
+	local hrp = getHRP()
+	if not hrp then return end
+	local structure = workspace:FindFirstChild("Structure")
+	if not structure then return end
+	-- Try Stage15 / Level15 furthest part
+	local target = nil
+	for _, stageName in ipairs({"Level15", "Stage15", "Stage14", "Stage13"}) do
+		local stage = structure:FindFirstChild(stageName)
+		if stage then
+			for _, p in ipairs(stage:GetDescendants()) do
+				if p:IsA("BasePart") then
+					target = p.Position + Vector3.new(0, 5, 0)
+					break
+				end
+			end
+			if target then break end
+		end
+	end
+	if target then
+		hrp.CFrame = CFrame.new(target)
+	else
+		-- fallback: very far ahead
+		hrp.CFrame = CFrame.new(0, 50, 1000)
+	end
+end
+
+-- ── Logging ────────────────────────────────────────────────────────────────
+local logFrame, logLayout
+local function log(msg)
+	if #S.logLines >= 80 then
+		table.remove(S.logLines, 1)
+	end
+	table.insert(S.logLines, os.date("%H:%M:%S") .. "  " .. msg)
+	if logFrame then
+		for _, c in ipairs(logFrame:GetChildren()) do
+			if c:IsA("TextLabel") then c:Destroy() end
+		end
+		for i = #S.logLines, math.max(1, #S.logLines - 14), -1 do
+			local lbl = Instance.new("TextLabel")
+			lbl.BackgroundTransparency = 1
+			lbl.Size = UDim2.new(1, 0, 0, 16)
+			lbl.Font = Enum.Font.Code
+			lbl.TextSize = 11
+			lbl.TextXAlignment = Enum.TextXAlignment.Left
+			lbl.TextColor3 = Color3.fromRGB(190, 230, 255)
+			lbl.Text = S.logLines[i]
+			lbl.TextTruncate = Enum.TextTruncate.AtEnd
+			lbl.LayoutOrder = #S.logLines - i
+			lbl.Parent = logFrame
+		end
+	end
+end
+
+-- ── GUI constants ──────────────────────────────────────────────────────────
+local C = {
+	bg      = Color3.fromRGB(8,   6,  16),
+	panel   = Color3.fromRGB(14,  10, 26),
+	card    = Color3.fromRGB(18,  13, 32),
+	accent  = Color3.fromRGB(249, 115, 22),   -- candy orange
+	accent2 = Color3.fromRGB(251, 146, 60),
+	text    = Color3.fromRGB(255, 245, 235),
+	muted   = Color3.fromRGB(160, 130, 100),
+	green   = Color3.fromRGB(52,  211, 153),
+	yellow  = Color3.fromRGB(250, 204,  21),
+	red     = Color3.fromRGB(248, 113, 113),
+	pink    = Color3.fromRGB(244, 114, 182),
+}
+
+local function corner(inst, r)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, r or 8)
+	c.Parent = inst
+end
+local function stroke(inst, col, t, tr)
+	local s = Instance.new("UIStroke")
+	s.Color = col or C.accent
+	s.Thickness = t or 1
+	s.Transparency = tr or 0.5
+	s.Parent = inst
+end
+
+-- ── Build GUI ──────────────────────────────────────────────────────────────
+for _, n in ipairs({"CandyEscape", "SigmaCandy"}) do
+	local old = plr.PlayerGui:FindFirstChild(n)
+	if old then old:Destroy() end
+end
+
+local GUI_DISPLAY_ORDER = 999
+local gui = Instance.new("ScreenGui")
+gui.Name = "CandyEscape"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.DisplayOrder = GUI_DISPLAY_ORDER
+gui.Parent = plr:WaitForChild("PlayerGui")
+
+-- ensure on top
+local function ensureOnTop()
+	local pg = plr:FindFirstChild("PlayerGui")
+	if not pg then return end
+	local maxOrder = 0
+	for _, sg in ipairs(pg:GetChildren()) do
+		if sg:IsA("ScreenGui") and sg ~= gui and sg.Enabled then
+			maxOrder = math.max(maxOrder, sg.DisplayOrder)
+		end
+	end
+	if maxOrder >= GUI_DISPLAY_ORDER then
+		gui.DisplayOrder = maxOrder + 1
+	end
+end
+ensureOnTop()
+local pg = plr:FindFirstChild("PlayerGui")
+if pg then
+	pg.ChildAdded:Connect(function(child)
+		if child:IsA("ScreenGui") then task.wait(0.1); ensureOnTop() end
+	end)
+end
+
+-- Main window
+local WIN_W, WIN_H = 460, 480
+local root = Instance.new("Frame")
+root.Size = UDim2.fromOffset(WIN_W, WIN_H)
+root.Position = UDim2.new(0, 20, 0.5, -WIN_H / 2)
+root.BackgroundColor3 = C.bg
+root.BorderSizePixel = 0
+root.Parent = gui
+corner(root, 12)
+stroke(root, C.accent2, 1.2, 0.4)
+
+-- Title bar
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 44)
+titleBar.BackgroundColor3 = C.panel
+titleBar.BorderSizePixel = 0
+titleBar.Parent = root
+corner(titleBar, 12)
+
+-- Square off bottom corners of title bar
+local titleFix = Instance.new("Frame")
+titleFix.Size = UDim2.new(1, 0, 0.5, 0)
+titleFix.Position = UDim2.fromScale(0, 0.5)
+titleFix.BackgroundColor3 = C.panel
+titleFix.BorderSizePixel = 0
+titleFix.Parent = titleBar
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.BackgroundTransparency = 1
+titleLabel.Size = UDim2.new(1, -90, 1, 0)
+titleLabel.Position = UDim2.fromOffset(12, 0)
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 16
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.TextColor3 = C.text
+titleLabel.Text = "🍬 Candy Escape  " .. CANDY_VERSION
+titleLabel.Parent = titleBar
+
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.fromOffset(26, 26)
+minBtn.Position = UDim2.new(1, -62, 0.5, -13)
+minBtn.BackgroundColor3 = C.yellow
+minBtn.Text = "−"
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 16
+minBtn.TextColor3 = Color3.new(0.1, 0.1, 0.1)
+minBtn.Parent = titleBar
+corner(minBtn, 13)
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.fromOffset(26, 26)
+closeBtn.Position = UDim2.new(1, -32, 0.5, -13)
+closeBtn.BackgroundColor3 = C.red
+closeBtn.Text = "×"
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 16
+closeBtn.TextColor3 = Color3.new(1, 1, 1)
+closeBtn.Parent = titleBar
+corner(closeBtn, 13)
+
+-- Content area
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -20, 1, -54)
+content.Position = UDim2.fromOffset(10, 48)
+content.BackgroundTransparency = 1
+content.Parent = root
+
+-- ── Toggle builder ─────────────────────────────────────────────────────────
+local toggleY = 0
+local TOGGLE_H = 38
+local TOGGLE_GAP = 6
+
+local function makeSection(title, yOff)
+	local sec = Instance.new("TextLabel")
+	sec.BackgroundTransparency = 1
+	sec.Size = UDim2.new(1, 0, 0, 18)
+	sec.Position = UDim2.fromOffset(2, yOff)
+	sec.Font = Enum.Font.GothamBold
+	sec.TextSize = 11
+	sec.TextXAlignment = Enum.TextXAlignment.Left
+	sec.TextColor3 = C.accent
+	sec.Text = string.upper(title)
+	sec.Parent = content
+	return yOff + 22
+end
+
+local function makeToggle(labelText, subText, yOff, getter, setter)
+	local card = Instance.new("Frame")
+	card.Size = UDim2.new(1, 0, 0, TOGGLE_H)
+	card.Position = UDim2.fromOffset(0, yOff)
+	card.BackgroundColor3 = C.card
+	card.BorderSizePixel = 0
+	card.Parent = content
+	corner(card, 8)
+
+	local lbl = Instance.new("TextLabel")
+	lbl.BackgroundTransparency = 1
+	lbl.Size = UDim2.new(0.65, 0, 0, 20)
+	lbl.Position = UDim2.fromOffset(10, 4)
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextSize = 13
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.TextColor3 = C.text
+	lbl.Text = labelText
+	lbl.Parent = card
+
+	if subText and #subText > 0 then
+		local sub = Instance.new("TextLabel")
+		sub.BackgroundTransparency = 1
+		sub.Size = UDim2.new(0.65, 0, 0, 14)
+		sub.Position = UDim2.fromOffset(10, 22)
+		sub.Font = Enum.Font.Gotham
+		sub.TextSize = 10
+		sub.TextXAlignment = Enum.TextXAlignment.Left
+		sub.TextColor3 = C.muted
+		sub.Text = subText
+		sub.Parent = card
+	end
+
+	-- Toggle pill
+	local pillBg = Instance.new("TextButton")
+	pillBg.Size = UDim2.fromOffset(46, 24)
+	pillBg.Position = UDim2.new(1, -54, 0.5, -12)
+	pillBg.BackgroundColor3 = getter() and C.green or Color3.fromRGB(50, 40, 70)
+	pillBg.Text = ""
+	pillBg.AutoButtonColor = false
+	pillBg.Parent = card
+	corner(pillBg, 12)
+
+	local knob = Instance.new("Frame")
+	knob.Size = UDim2.fromOffset(18, 18)
+	knob.Position = getter() and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3)
+	knob.BackgroundColor3 = Color3.new(1, 1, 1)
+	knob.BorderSizePixel = 0
+	knob.Parent = pillBg
+	corner(knob, 9)
+
+	local function refresh()
+		local on = getter()
+		TweenService:Create(pillBg, TweenInfo.new(0.15), { BackgroundColor3 = on and C.green or Color3.fromRGB(50, 40, 70) }):Play()
+		TweenService:Create(knob, TweenInfo.new(0.15), { Position = on and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3) }):Play()
+	end
+
+	pillBg.MouseButton1Click:Connect(function()
+		setter(not getter())
+		refresh()
+	end)
+	card.MouseButton1Click:Connect(function()
+		setter(not getter())
+		refresh()
+	end)
+
+	return yOff + TOGGLE_H + TOGGLE_GAP, refresh
+end
+
+local function makeButton(labelText, yOff, onClick)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, 0, 0, TOGGLE_H)
+	btn.Position = UDim2.fromOffset(0, yOff)
+	btn.BackgroundColor3 = C.card
+	btn.Text = labelText
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 13
+	btn.TextColor3 = C.text
+	btn.AutoButtonColor = false
+	btn.Parent = content
+	corner(btn, 8)
+	stroke(btn, C.accent, 0.8, 0.6)
+
+	btn.MouseEnter:Connect(function()
+		TweenService:Create(btn, TweenInfo.new(0.1), { BackgroundColor3 = C.accent }):Play()
+		TweenService:Create(btn, TweenInfo.new(0.1), { TextColor3 = Color3.new(0, 0, 0) }):Play()
+	end)
+	btn.MouseLeave:Connect(function()
+		TweenService:Create(btn, TweenInfo.new(0.1), { BackgroundColor3 = C.card }):Play()
+		TweenService:Create(btn, TweenInfo.new(0.1), { TextColor3 = C.text }):Play()
+	end)
+	btn.MouseButton1Click:Connect(onClick)
+	return yOff + TOGGLE_H + TOGGLE_GAP
+end
+
+local function makeSlider(labelText, yOff, minV, maxV, getter, setter, fmt)
+	local card = Instance.new("Frame")
+	card.Size = UDim2.new(1, 0, 0, 48)
+	card.Position = UDim2.fromOffset(0, yOff)
+	card.BackgroundColor3 = C.card
+	card.BorderSizePixel = 0
+	card.Parent = content
+	corner(card, 8)
+
+	local valLbl = Instance.new("TextLabel")
+	valLbl.BackgroundTransparency = 1
+	valLbl.Size = UDim2.new(1, -10, 0, 20)
+	valLbl.Position = UDim2.fromOffset(10, 2)
+	valLbl.Font = Enum.Font.GothamBold
+	valLbl.TextSize = 12
+	valLbl.TextXAlignment = Enum.TextXAlignment.Left
+	valLbl.TextColor3 = C.text
+	valLbl.Text = labelText .. ": " .. (fmt and fmt(getter()) or getter())
+	valLbl.Parent = card
+
+	local track = Instance.new("Frame")
+	track.Size = UDim2.new(1, -20, 0, 8)
+	track.Position = UDim2.fromOffset(10, 28)
+	track.BackgroundColor3 = Color3.fromRGB(40, 30, 60)
+	track.BorderSizePixel = 0
+	track.Parent = card
+	corner(track, 4)
+
+	local fill = Instance.new("Frame")
+	local pct = (getter() - minV) / (maxV - minV)
+	fill.Size = UDim2.fromScale(math.clamp(pct, 0, 1), 1)
+	fill.BackgroundColor3 = C.accent
+	fill.BorderSizePixel = 0
+	fill.Parent = track
+	corner(fill, 4)
+
+	local dragging = false
+	track.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+		end
+	end)
+	track.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = false
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if not dragging then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+		local abs = track.AbsolutePosition
+		local sz  = track.AbsoluteSize
+		local rel = math.clamp((input.Position.X - abs.X) / sz.X, 0, 1)
+		local val = minV + rel * (maxV - minV)
+		setter(val)
+		fill.Size = UDim2.fromScale(rel, 1)
+		valLbl.Text = labelText .. ": " .. (fmt and fmt(val) or math.floor(val))
+	end)
+
+	return yOff + 48 + TOGGLE_GAP
+end
+
+-- ── Layout ─────────────────────────────────────────────────────────────────
+local y = 0
+
+-- MOVEMENT section
+y = makeSection("Movement", y)
+y, _ = makeToggle("Speed Hack",    "Bypass walkspeed cap (no gamepass needed)", y,
+	function() return S.speedHack end,
+	function(v)
+		S.speedHack = v
+		if v then
+			log("Speed hack ON (" .. math.floor(S.speedVal) .. ")")
+			startSpeedHack()
+		else
+			log("Speed hack OFF")
+		end
+	end)
+y = makeSlider("Speed", y, 16, 3000, function() return S.speedVal end,
+	function(v) S.speedVal = math.floor(v) end,
+	function(v) return tostring(math.floor(v)) end)
+y, _ = makeToggle("Fly",           "WASD + Space/Shift to fly",                  y,
+	function() return S.fly end,
+	function(v)
+		S.fly = v
+		if v then startFly() else stopFly() end
+		log("Fly " .. (v and "ON" or "OFF"))
+	end)
+y, _ = makeToggle("Noclip",        "Walk through walls & obstacles",              y,
+	function() return S.noclip end,
+	function(v)
+		S.noclip = v
+		if v then startNoclip() else stopNoclip() end
+		log("Noclip " .. (v and "ON" or "OFF"))
+	end)
+y, _ = makeToggle("Infinite Jump",  "Jump in the air infinitely",                y,
+	function() return S.infiniteJump end,
+	function(v)
+		S.infiniteJump = v
+		if v and not jumpConn then startInfiniteJump() end
+		log("Infinite jump " .. (v and "ON" or "OFF"))
+	end)
+y, _ = makeToggle("Anti-Void",     "Auto-rescue if you fall off the map",         y,
+	function() return S.antiVoid end,
+	function(v)
+		S.antiVoid = v
+		if v then startAntiVoid() end
+		log("Anti-void " .. (v and "ON" or "OFF"))
+	end)
+
+-- AUTOMATION section
+y = makeSection("Automation", y)
+y, _ = makeToggle("Auto-Win Farm",  "TP to WinBlock repeatedly to farm wins",     y,
+	function() return S.autoWin end,
+	function(v)
+		S.autoWin = v
+		if v then startAutoWin() end
+		log("Auto-win " .. (v and "ON" or "OFF"))
+	end)
+y, _ = makeToggle("Auto-Rebirth",  "Auto-rebirth when possible",                  y,
+	function() return S.autoRebirth end,
+	function(v)
+		S.autoRebirth = v
+		if v then startAutoRebirth() end
+		log("Auto-rebirth " .. (v and "ON" or "OFF"))
+	end)
+
+-- TELEPORT section
+y = makeSection("Teleport", y)
+y = makeButton("⚡ TP to Last Stage", y, function()
+	log("Teleporting to last stage...")
+	tpToLastStage()
+end)
+
+-- Stage buttons row
+local stageRowY = y
+local stageRowH = TOGGLE_H
+local nStages = #STAGE_SPAWNS
+local btnW = math.floor((WIN_W - 20) / nStages) - 4
+for i, entry in ipairs(STAGE_SPAWNS) do
+	local xOff = (i - 1) * (btnW + 4)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.fromOffset(btnW, stageRowH)
+	btn.Position = UDim2.fromOffset(xOff, stageRowY)
+	btn.BackgroundColor3 = C.panel
+	btn.Text = "S" .. (i - 1)
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 11
+	btn.TextColor3 = C.text
+	btn.AutoButtonColor = false
+	btn.Parent = content
+	corner(btn, 6)
+	stroke(btn, C.accent, 0.6, 0.65)
+	btn.MouseButton1Click:Connect(function()
+		log("TP → " .. entry.name)
+		tpToStage(i)
+	end)
+end
+y = stageRowY + stageRowH + TOGGLE_GAP
+
+-- Log area
+y = makeSection("Log", y)
+local logContainer = Instance.new("Frame")
+logContainer.Size = UDim2.new(1, 0, 1, -(y + 2))
+logContainer.Position = UDim2.fromOffset(0, y)
+logContainer.BackgroundColor3 = Color3.fromRGB(5, 4, 12)
+logContainer.ClipsDescendants = true
+logContainer.Parent = content
+corner(logContainer, 6)
+
+logFrame = Instance.new("Frame")
+logFrame.Size = UDim2.new(1, -8, 1, -4)
+logFrame.Position = UDim2.fromOffset(4, 2)
+logFrame.BackgroundTransparency = 1
+logFrame.Parent = logContainer
+
+local logListLayout = Instance.new("UIListLayout")
+logListLayout.Padding = UDim.new(0, 1)
+logListLayout.FillDirection = Enum.FillDirection.Vertical
+logListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+logListLayout.Parent = logFrame
+
+-- ── Dragging ───────────────────────────────────────────────────────────────
+local dragging, dragStart, startPos = false, nil, nil
+titleBar.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = true
+		dragStart = input.Position
+		startPos = root.Position
+	end
+end)
+titleBar.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = false
+	end
+end)
+UserInputService.InputChanged:Connect(function(input)
+	if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+		local d = input.Position - dragStart
+		root.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + d.X,
+			startPos.Y.Scale, startPos.Y.Offset + d.Y
+		)
+	end
+end)
+
+-- ── Minimize / toggle ──────────────────────────────────────────────────────
+local minimized = false
+minBtn.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	content.Visible = not minimized
+	root.Size = minimized and UDim2.fromOffset(WIN_W, 44) or UDim2.fromOffset(WIN_W, WIN_H)
+end)
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then return end
+	if input.KeyCode == Enum.KeyCode.RightBracket then
+		gui.Enabled = not gui.Enabled
+	end
+end)
+
+-- ── Cleanup ────────────────────────────────────────────────────────────────
+local function cleanup()
+	S.running = false
+	S.speedHack = false
+	S.fly = false
+	S.noclip = false
+	S.infiniteJump = false
+	S.antiVoid = false
+	S.autoWin = false
+	S.autoRebirth = false
+	stopFly()
+	stopNoclip()
+	if speedConn then speedConn:Disconnect() end
+	if jumpConn  then jumpConn:Disconnect()  end
+	if antiVoidConn then antiVoidConn:Disconnect() end
+	-- restore humanoid
+	local hum = getHum()
+	if hum then hum.WalkSpeed = 16 end
+end
+
+closeBtn.MouseButton1Click:Connect(function()
+	cleanup()
+	gui:Destroy()
+end)
+
+-- also clean up if main sigma stop is requested
+task.spawn(function()
+	while S.running do
+		if getgenv().SigmaStopRequested then
+			cleanup()
+			pcall(function() gui:Destroy() end)
+			break
+		end
+		task.wait(0.5)
+	end
+end)
+
+-- ── Initial log ────────────────────────────────────────────────────────────
+log("Candy Escape " .. CANDY_VERSION .. " loaded")
+log("PlaceId: " .. game.PlaceId)
+log("Speed=" .. (plr.leaderstats and plr.leaderstats.Speed and plr.leaderstats.Speed.Value or "?")
+	.. "  Wins=" .. (plr.leaderstats and plr.leaderstats.Wins and plr.leaderstats.Wins.Value or "?")
+	.. "  Rebirths=" .. (plr.leaderstats and plr.leaderstats.Rebirths and plr.leaderstats.Rebirths.Value or "?"))
+log("[RCtrl+]] to toggle GUI")
+]=],
 }
 
 local EMBEDDED_ICON_BASE64 = ""
@@ -5033,6 +5887,18 @@ local GAMES = {
 		placeId = 79268393072444,
 		iconPath = "assets/sell_lemons_icon.png",
 		file = "sell_lemons.lua",
+	},
+	{
+		id = "candy_escape",
+		name = "Candy Escape",
+		subtitle = "+1 Speed Keyboard Escape · Wins · Rebirth",
+		keywords = { "candy", "chocolate", "escape", "keyboard", "speed", "obby", "treadmill" },
+		placeIds = { 95082159892680 },
+		status = "working",
+		placeId = 95082159892680,
+		iconPath = "assets/candy_escape_icon.png",
+		file = "candy_escape.lua",
+		iconFallback = "🍬",
 	},
 }
 
@@ -5108,7 +5974,7 @@ local function loadGameModule(entry)
 		error("compile file: " .. tostring(err))
 	end
 
-	error("Game script missing — re-run bundle or keep sell_lemons.lua with sigma_hub.lua")
+	error("Game script missing — re-run bundle or keep " .. entry.file .. " with sigma_hub.lua")
 end
 
 local function cleanupSigmaScripts()
@@ -5377,7 +6243,7 @@ local function fetchGameIcon(iconLabel, fallbackLabel, entry, statusLabel)
 			return
 		end
 
-		local thumbUrl = tryRobloxIconUrl(entry) or SELL_LEMONS_ICON_URL
+		local thumbUrl = tryRobloxIconUrl(entry)
 		if thumbUrl then
 			asset, method = tryHttpDownloadIcon(thumbUrl)
 			if asset then
@@ -5613,7 +6479,7 @@ local hubActive = true
 
 local function launchGame(entry, cardSub)
 	if not gameWorksHere(entry) then
-		cardSub.Text = "Join Sell Lemons first, then click again"
+		cardSub.Text = "Join " .. entry.name .. " first, then click again"
 		cardSub.TextColor3 = C.red
 		statusMsg.Text = "Wrong game — PlaceId " .. tostring(game.PlaceId)
 		return
@@ -5668,7 +6534,7 @@ for _, entry in GAMES do
 	iconFallback.BackgroundTransparency = 1
 	iconFallback.Font = Enum.Font.GothamBold
 	iconFallback.TextSize = 28
-	iconFallback.Text = "🍋"
+	iconFallback.Text = entry.iconFallback or "🍋"
 	iconFallback.Visible = false
 	iconFallback.Parent = iconWrap
 
