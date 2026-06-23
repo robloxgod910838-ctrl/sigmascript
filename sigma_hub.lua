@@ -5012,6 +5012,1085 @@ end
 
 getgenv().SigmaScriptsRunning = nil
 ]=],
+	anime_defend = [=[-- Defend ur base with anime — Sigma Scripts game module
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local RS = game:GetService("ReplicatedStorage")
+
+local plr = Players.LocalPlayer
+local SIGMA_VERSION = "2026.06.23-anime2"
+
+local LOOP_DELAY = 0.35
+local PLACE_DELAY = 0.5
+local WAVE_DELAY = 2
+local BP_MAX_LEVEL = 30
+
+local PlacementHelper
+local CharactersInfo
+pcall(function()
+	PlacementHelper = require(RS:WaitForChild("Modules"):WaitForChild("Shared"):WaitForChild("PlacementHelper"))
+	CharactersInfo = require(RS:WaitForChild("Modules"):WaitForChild("Shared"):WaitForChild("CharactersInfo"))
+end)
+local Shapes = RS:WaitForChild("Assets"):WaitForChild("Shapes")
+
+local GAMEPASSES = {
+	Roll = 80526269795309,
+	Luck = 104655544213012,
+	Cash = 109119677802273,
+	Speed = 131581779204553,
+}
+
+local Remotes = RS:WaitForChild("Remotes")
+local CharRemotes = Remotes:WaitForChild("Characters")
+local StartRemotes = Remotes:WaitForChild("Start")
+local AutoRollRemotes = Remotes:FindFirstChild("AutoRoll")
+local NPCEvents = Remotes:FindFirstChild("NPCEvents")
+local SpinRemotes = Remotes:FindFirstChild("SpinWheel")
+
+local PickupCharacter = CharRemotes:WaitForChild("PickupCharacter")
+local PlaceCharacter = CharRemotes:WaitForChild("PlaceCharacter")
+local StartWave = StartRemotes:WaitForChild("StartWave")
+local BPClaim = RS:WaitForChild("Battlepass"):WaitForChild("Claim")
+local BPClaimQuest = RS:WaitForChild("BattlepassQuest"):WaitForChild("ClaimQuest")
+local BPGetQuest = RS:WaitForChild("BattlepassQuest"):FindFirstChild("GetQuestData")
+
+local DataClient
+local dataReady = false
+
+local State = {
+	autoRoll = false,
+	autoBuy = false,
+	autoPlace = false,
+	autoWave = false,
+	autoSell = false,
+	autoClaimBP = false,
+	autoClaimQuest = false,
+	autoSpin = false,
+	fastRoll = true,
+	bypassPremium = true,
+	bypassGamepass = true,
+	skipRollAnim = true,
+	running = true,
+	lastAction = "Idle",
+	logLines = {},
+	rollBusy = false,
+	lastRollAt = 0,
+	lastPlaceAt = 0,
+	lastWaveAt = 0,
+	lastBPAt = 0,
+	lastSellAt = 0,
+	lastSpinAt = 0,
+	tick = 0,
+}
+
+local UI = {
+	activeNav = "Home",
+	toggleCards = {},
+	frames = 0,
+}
+
+local heartbeatConn
+local hooksInstalled = false
+
+local function log(msg)
+	table.insert(State.logLines, 1, os.date("%H:%M:%S") .. "  " .. msg)
+	if #State.logLines > 14 then
+		table.remove(State.logLines)
+	end
+	if UI.logLabel then
+		UI.logLabel.Text = table.concat(State.logLines, "\n")
+	end
+end
+
+local function setStatus(msg)
+	State.lastAction = msg
+	if UI.statusLabel then
+		UI.statusLabel.Text = "Status: " .. msg
+	end
+	if UI.footerStatus then
+		UI.footerStatus.Text = msg
+	end
+end
+
+local function initDataClient()
+	if DataClient then
+		return DataClient
+	end
+	local ok, client = pcall(function()
+		local svc = require(RS:WaitForChild("Data"):WaitForChild("DataService"))
+		local c = svc.client
+		c:waitForData()
+		return c
+	end)
+	if ok and client then
+		DataClient = client
+		dataReady = true
+		log("DataService connected")
+	else
+		log("DataService unavailable")
+	end
+	return DataClient
+end
+
+local function getData(key, fallback)
+	if not DataClient then
+		initDataClient()
+	end
+	if not DataClient then
+		return fallback
+	end
+	local ok, val = pcall(function()
+		return DataClient:get(key)
+	end)
+	if ok and val ~= nil then
+		return val
+	end
+	return fallback
+end
+
+local function getPlayerBase()
+	local plots = Workspace:FindFirstChild("Plots")
+	if plots then
+		for _, plot in plots:GetChildren() do
+			if plot:GetAttribute("Owner") == plr.Name then
+				return plot
+			end
+		end
+	end
+	return nil
+end
+
+local function getRollDelay()
+	if State.fastRoll or plr:GetAttribute("FastRoll") == true then
+		return 0.35
+	end
+	return 4
+end
+
+local function firePrompt(prompt)
+	if not prompt or not fireproximityprompt then
+		return false
+	end
+	local ok = pcall(function()
+		fireproximityprompt(prompt)
+	end)
+	return ok
+end
+
+local function triggerPrompt(inst)
+	if not inst then
+		return false
+	end
+	local fired = false
+	for _, d in inst:GetDescendants() do
+		if d:IsA("ProximityPrompt") then
+			pcall(function()
+				if fireproximityprompt then
+					fireproximityprompt(d)
+					fired = true
+				end
+			end)
+		elseif d:IsA("ClickDetector") and fireclickdetector then
+			pcall(function()
+				fireclickdetector(d)
+				fired = true
+			end)
+		end
+	end
+	return fired
+end
+
+local function rollOnce()
+	if State.rollBusy then
+		return false
+	end
+	State.rollBusy = true
+	local ok = false
+
+	pcall(function()
+		if State.fastRoll then
+			plr:SetAttribute("FastRoll", true)
+		end
+
+		local base = getPlayerBase()
+		if base then
+			local rollFolder = base:FindFirstChild("Roll")
+			if rollFolder then
+				for _, d in rollFolder:GetDescendants() do
+					if d:IsA("ProximityPrompt") and d.Name == "RollPrompt" then
+						if firePrompt(d) then
+							ok = true
+						end
+					end
+				end
+				if not ok then
+					ok = triggerPrompt(rollFolder)
+				end
+			end
+		end
+
+		if AutoRollRemotes then
+			local toggle = AutoRollRemotes:FindFirstChild("Toggle")
+			if toggle and toggle:IsA("RemoteEvent") then
+				toggle:FireServer(true)
+				ok = true
+			end
+			local setting = AutoRollRemotes:FindFirstChild("SetSetting")
+			if setting and setting:IsA("RemoteEvent") then
+				setting:FireServer("Enabled", true)
+				ok = true
+			end
+			if base then
+				local rollFolder = base:FindFirstChild("Roll")
+				if rollFolder then
+					for _, d in rollFolder:GetDescendants() do
+						if d:IsA("ProximityPrompt") and d.Name == "AutoRollPrompt" then
+							if firePrompt(d) then
+								ok = true
+							end
+						end
+					end
+				end
+			end
+		end
+
+		local pop = CharRemotes:FindFirstChild("PopCharacters")
+		if pop and pop:IsA("RemoteEvent") then
+			pop:FireServer()
+			ok = true
+		end
+	end)
+
+	State.rollBusy = false
+	State.lastRollAt = os.clock()
+	if ok then
+		setStatus("Rolled")
+		log("Roll fired")
+	else
+		log("Roll: no remote/button found")
+	end
+	return ok
+end
+
+local function getRolledCharacters(base)
+	base = base or getPlayerBase()
+	if not base then
+		return {}
+	end
+	local folder = base:FindFirstChild("Characters")
+	if not folder then
+		return {}
+	end
+	local out = {}
+	for _, child in folder:GetChildren() do
+		if child:IsA("Model") and (child.PrimaryPart or child:FindFirstChildWhichIsA("BasePart")) then
+			table.insert(out, child)
+		end
+	end
+	return out
+end
+
+local function buyCharacter(model)
+	if not model or not model.Parent then
+		return false
+	end
+	local ok = pcall(function()
+		PickupCharacter:FireServer(model)
+	end)
+	if ok then
+		log("Buy: " .. model.Name)
+	end
+	return ok
+end
+
+local function tryAutoBuy()
+	local chars = getRolledCharacters()
+	for _, model in chars do
+		buyCharacter(model)
+	end
+	return #chars > 0
+end
+
+local function isCharacterToolName(name)
+	if CharactersInfo and CharactersInfo.Characters then
+		for _, variants in pairs(CharactersInfo.Characters) do
+			for toolName in pairs(variants) do
+				if toolName == name then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
+local function getInventoryTools()
+	local out = {}
+	local function scan(container)
+		if not container then
+			return
+		end
+		for _, item in container:GetChildren() do
+			if item:IsA("Tool") then
+				if item:FindFirstChild("CharacterId") or item:GetAttribute("CharacterId") or isCharacterToolName(item.Name) then
+					table.insert(out, item)
+				end
+			end
+		end
+	end
+	scan(plr:FindFirstChild("Backpack"))
+	if plr.Character then
+		scan(plr.Character)
+	end
+	return out
+end
+
+local function findEmptyGridCell(base, gridMap)
+	local fighters = base:FindFirstChild("Fighters")
+	local occupied = {}
+	if fighters and PlacementHelper then
+		for _, fighter in fighters:GetChildren() do
+			if fighter:IsA("Model") then
+				local part = fighter.PrimaryPart or fighter:FindFirstChildWhichIsA("BasePart")
+				if part then
+					local cell = PlacementHelper.GetClosestCellForPart(part, gridMap)
+					if cell then
+						occupied[cell.Name] = true
+					end
+				end
+			end
+		end
+	end
+	for cellName, cell in pairs(gridMap) do
+		if not occupied[cellName] then
+			return cellName, cell
+		end
+	end
+	return nil, nil
+end
+
+local function tryAutoPlace()
+	local base = getPlayerBase()
+	if not base or not PlacementHelper then
+		return false
+	end
+	initDataClient()
+	local tools = getInventoryTools()
+	if #tools == 0 then
+		return false
+	end
+	local gridLevel = getData("GridLevel", 1)
+	local gridRoot = base:FindFirstChild("Grid")
+	local levelGrid = gridRoot and gridRoot:FindFirstChild("Level" .. tostring(gridLevel))
+	if not levelGrid then
+		return false
+	end
+	local gridMap = PlacementHelper.BuildGridMap(levelGrid)
+	local placed = false
+	for _, tool in tools do
+		local shapeName = PlacementHelper.GetShapeName(Shapes, tool.Name)
+		local cellName, cell = findEmptyGridCell(base, gridMap)
+		if shapeName and cellName and cell then
+			local ok = pcall(function()
+				PlaceCharacter:FireServer({
+					CharacterName = tool.Name,
+					ShapeName = shapeName,
+					HoveredCellName = cellName,
+					ShapeCFrame = cell.CFrame,
+				})
+			end)
+			if ok then
+				placed = true
+				gridMap[cellName] = nil
+				log("Place: " .. tool.Name .. " @ " .. cellName)
+			end
+		end
+	end
+	if placed then
+		setStatus("Placed units")
+		log("Auto place sent")
+	end
+	State.lastPlaceAt = os.clock()
+	return placed
+end
+
+local function tryStartWave()
+	local base = getPlayerBase()
+	if base and base:GetAttribute("WaveStarted") == true then
+		return false
+	end
+	local ok = pcall(function()
+		StartWave:FireServer()
+	end)
+	if ok then
+		setStatus("Wave started")
+		log("StartWave fired")
+	end
+	State.lastWaveAt = os.clock()
+	return ok
+end
+
+local function claimBattlepass()
+	local claimed = 0
+	for level = 1, BP_MAX_LEVEL do
+		pcall(function()
+			BPClaim:FireServer(level, false)
+			claimed += 1
+		end)
+		if State.bypassPremium then
+			pcall(function()
+				BPClaim:FireServer(level, true)
+				BPClaim:FireServer(level, "Premium")
+				BPClaim:FireServer(level, "Free", true)
+			end)
+		end
+	end
+	log("BP claim sweep L1-" .. BP_MAX_LEVEL)
+	State.lastBPAt = os.clock()
+	return claimed > 0
+end
+
+local function claimQuests()
+	if not BPGetQuest or not BPGetQuest:IsA("RemoteFunction") then
+		pcall(function()
+			BPClaimQuest:FireServer()
+		end)
+		return
+	end
+	local ok, data = pcall(function()
+		return BPGetQuest:InvokeServer()
+	end)
+	if ok and type(data) == "table" then
+		for id, quest in pairs(data) do
+			if type(quest) == "table" and (quest.Completed or quest.Progress >= (quest.Requirement or quest.Target or 999999)) then
+				pcall(function()
+					BPClaimQuest:FireServer(id)
+					BPClaimQuest:FireServer(quest.ID or id)
+				end)
+			end
+		end
+	else
+		pcall(function()
+			BPClaimQuest:FireServer()
+		end)
+	end
+	log("Quest claim pass")
+end
+
+local function trySellDuplicates()
+	if not NPCEvents then
+		return false
+	end
+	local sell = NPCEvents:FindFirstChild("SellCharacters") or NPCEvents:FindFirstChild("TalkSell")
+	if not sell then
+		return false
+	end
+	local ok = pcall(function()
+		if sell:IsA("RemoteEvent") then
+			sell:FireServer()
+			sell:FireServer(true)
+		elseif sell:IsA("RemoteFunction") then
+			sell:InvokeServer()
+		end
+	end)
+	if ok then
+		log("Sell remotes fired")
+		setStatus("Sell sent")
+	end
+	State.lastSellAt = os.clock()
+	return ok
+end
+
+local function trySpinWheel()
+	if not SpinRemotes then
+		return false
+	end
+	local spin = SpinRemotes:FindFirstChild("Spin")
+	if not spin or not spin:IsA("RemoteEvent") then
+		return false
+	end
+	local ok = pcall(function()
+		spin:FireServer()
+		spin:FireServer(true)
+	end)
+	if ok then
+		log("Spin wheel fired")
+	end
+	State.lastSpinAt = os.clock()
+	return ok
+end
+
+local function installBypassHooks()
+	if hooksInstalled then
+		return
+	end
+	hooksInstalled = true
+
+	if State.fastRoll then
+		plr:SetAttribute("FastRoll", true)
+		plr:GetAttributeChangedSignal("FastRoll"):Connect(function()
+			if State.fastRoll and plr:GetAttribute("FastRoll") ~= true then
+				plr:SetAttribute("FastRoll", true)
+			end
+		end)
+	end
+
+	if not (hookmetamethod and getnamecallmethod) then
+		log("Executor hooks unavailable")
+		return
+	end
+
+	local old
+	old = hookmetamethod(game, "__namecall", function(self, ...)
+		local method = getnamecallmethod()
+		if State.bypassGamepass and method == "InvokeServer" then
+			local n = self.Name
+			if n == "RequestGamepass" or n == "GetRecipientGamepasses" then
+				local args = { ... }
+				local id = args[1]
+				if id == GAMEPASSES.Roll or id == GAMEPASSES.Luck or id == GAMEPASSES.Speed then
+					return true
+				end
+				if n == "GetRecipientGamepasses" then
+					return { GAMEPASSES.Roll, GAMEPASSES.Luck, GAMEPASSES.Speed, GAMEPASSES.Cash }
+				end
+			end
+			if n == "GetPlayersWithPremium" then
+				return { plr.UserId }
+			end
+		end
+		if State.skipRollAnim and method == "FireServer" and self == CharRemotes:FindFirstChild("KillCharacters") then
+			return nil
+		end
+		return old(self, ...)
+	end)
+	log("Bypass hooks installed")
+end
+
+local function readStats()
+	local cash = getData("Cash", plr:GetAttribute("Cash") or "?")
+	local waves = getData("Waves", plr:GetAttribute("Waves") or "?")
+	local bpLevel = getData("BattlepassLevel", getData("BPLevel", "?"))
+	local bpExp = getData("BattlepassEXP", getData("BPExp", "?"))
+	local base = getPlayerBase()
+	local rolled = base and #getRolledCharacters(base) or 0
+	local tools = #getInventoryTools()
+	return {
+		cash = tostring(cash),
+		waves = tostring(waves),
+		bpLevel = tostring(bpLevel),
+		bpExp = tostring(bpExp),
+		rolled = tostring(rolled),
+		tools = tostring(tools),
+		base = base and base.Name or "Not found",
+	}
+end
+
+local function onHeartbeat(dt)
+	if not State.running then
+		return
+	end
+	State.tick += 1
+	local now = os.clock()
+
+	if State.autoRoll and now - State.lastRollAt >= getRollDelay() then
+		rollOnce()
+	end
+	if State.autoBuy then
+		tryAutoBuy()
+	end
+	if State.autoPlace and now - State.lastPlaceAt >= PLACE_DELAY then
+		tryAutoPlace()
+	end
+	if State.autoWave and now - State.lastWaveAt >= WAVE_DELAY then
+		tryStartWave()
+	end
+	if State.autoClaimBP and now - State.lastBPAt >= 8 then
+		claimBattlepass()
+	end
+	if State.autoClaimQuest and State.tick % 120 == 0 then
+		claimQuests()
+	end
+	if State.autoSell and now - State.lastSellAt >= 5 then
+		trySellDuplicates()
+	end
+	if State.autoSpin and now - State.lastSpinAt >= 6 then
+		trySpinWheel()
+	end
+
+	if State.tick % 30 == 0 then
+		local s = readStats()
+		if UI.vCash then UI.vCash.Text = s.cash end
+		if UI.vWaves then UI.vWaves.Text = s.waves end
+		if UI.vBP then UI.vBP.Text = s.bpLevel end
+		if UI.vUnits then UI.vUnits.Text = s.tools .. " tools / " .. s.rolled .. " rolled" end
+		if UI.vBase then UI.vBase.Text = s.base end
+	end
+end
+
+local function buildUI()
+	local C = {
+		bg = Color3.fromRGB(10, 8, 18),
+		panel = Color3.fromRGB(16, 12, 28),
+		sidebar = Color3.fromRGB(14, 10, 24),
+		card = Color3.fromRGB(24, 16, 40),
+		cardInner = Color3.fromRGB(32, 20, 52),
+		border = Color3.fromRGB(58, 40, 88),
+		accent = Color3.fromRGB(236, 72, 153),
+		accent2 = Color3.fromRGB(192, 132, 252),
+		text = Color3.fromRGB(250, 245, 255),
+		muted = Color3.fromRGB(148, 130, 180),
+		green = Color3.fromRGB(52, 211, 153),
+		yellow = Color3.fromRGB(250, 204, 21),
+		red = Color3.fromRGB(248, 113, 113),
+	}
+
+	local function corner(parent, radius)
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0, radius or 10)
+		c.Parent = parent
+	end
+
+	local function stroke(parent, color, thickness, transparency)
+		local s = Instance.new("UIStroke")
+		s.Color = color or C.border
+		s.Thickness = thickness or 1
+		s.Transparency = transparency or 0.55
+		s.Parent = parent
+		return s
+	end
+
+	for _, name in ipairs({ "AnimeDefend", "SigmaAnime", "DefendAnimeHub" }) do
+		local old = plr.PlayerGui:FindFirstChild(name)
+		if old then old:Destroy() end
+	end
+
+	getgenv().SigmaStopRequested = false
+	State.running = true
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "AnimeDefend"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gui.DisplayOrder = 999999
+	gui.Parent = plr:WaitForChild("PlayerGui")
+	UI.gui = gui
+
+	local root = Instance.new("Frame")
+	root.Size = UDim2.fromOffset(680, 520)
+	root.Position = UDim2.fromScale(0.03, 0.08)
+	root.BackgroundColor3 = C.bg
+	root.BorderSizePixel = 0
+	root.Parent = gui
+	corner(root, 14)
+	stroke(root, C.accent, 1, 0.4)
+
+	local header = Instance.new("Frame")
+	header.Size = UDim2.new(1, 0, 0, 44)
+	header.BackgroundColor3 = C.panel
+	header.BorderSizePixel = 0
+	header.Parent = root
+	corner(header, 14)
+
+	local title = Instance.new("TextLabel")
+	title.BackgroundTransparency = 1
+	title.Size = UDim2.new(1, -80, 1, 0)
+	title.Position = UDim2.fromOffset(14, 0)
+	title.Font = Enum.Font.GothamBold
+	title.TextSize = 17
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextColor3 = C.text
+	title.Text = "Anime Defend · Sigma"
+	title.Parent = header
+
+	local ver = Instance.new("TextLabel")
+	ver.BackgroundTransparency = 1
+	ver.Size = UDim2.new(0, 200, 1, 0)
+	ver.Position = UDim2.fromOffset(200, 0)
+	ver.Font = Enum.Font.Gotham
+	ver.TextSize = 10
+	ver.TextXAlignment = Enum.TextXAlignment.Left
+	ver.TextColor3 = C.muted
+	ver.Text = SIGMA_VERSION
+	ver.Parent = header
+
+	local function hdrBtn(text, color, xOff, fn)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.fromOffset(22, 22)
+		b.Position = UDim2.new(1, xOff, 0.5, -11)
+		b.BackgroundColor3 = color
+		b.Text = text
+		b.Font = Enum.Font.GothamBold
+		b.TextSize = 13
+		b.TextColor3 = Color3.fromRGB(20, 20, 30)
+		b.Parent = header
+		corner(b, 11)
+		b.MouseButton1Click:Connect(fn)
+	end
+
+	hdrBtn("-", C.yellow, -58, function()
+		UI.body.Visible = not UI.body.Visible
+		root.Size = UI.body.Visible and UDim2.fromOffset(680, 520) or UDim2.fromOffset(680, 44)
+	end)
+	hdrBtn("×", C.red, -32, function()
+		State.running = false
+		if heartbeatConn then heartbeatConn:Disconnect() end
+		gui:Destroy()
+	end)
+
+	UI.body = Instance.new("Frame")
+	UI.body.Size = UDim2.new(1, 0, 1, -44)
+	UI.body.Position = UDim2.fromOffset(0, 44)
+	UI.body.BackgroundTransparency = 1
+	UI.body.Parent = root
+
+	local sidebar = Instance.new("Frame")
+	sidebar.Size = UDim2.new(0, 108, 1, -28)
+	sidebar.BackgroundColor3 = C.sidebar
+	sidebar.BorderSizePixel = 0
+	sidebar.Parent = UI.body
+	stroke(sidebar, C.border, 1, 0.65)
+
+	local navLayout = Instance.new("UIListLayout")
+	navLayout.Padding = UDim.new(0, 6)
+	navLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	navLayout.Parent = sidebar
+	Instance.new("UIPadding", sidebar).PaddingTop = UDim.new(0, 10)
+
+	local main = Instance.new("Frame")
+	main.Size = UDim2.new(1, -108, 1, -28)
+	main.Position = UDim2.fromOffset(108, 0)
+	main.BackgroundTransparency = 1
+	main.Parent = UI.body
+
+	local footer = Instance.new("Frame")
+	footer.Size = UDim2.new(1, 0, 0, 24)
+	footer.Position = UDim2.new(0, 0, 1, -24)
+	footer.BackgroundColor3 = C.panel
+	footer.BorderSizePixel = 0
+	footer.Parent = UI.body
+
+	UI.footerStatus = Instance.new("TextLabel")
+	UI.footerStatus.BackgroundTransparency = 1
+	UI.footerStatus.Size = UDim2.new(1, -16, 1, 0)
+	UI.footerStatus.Position = UDim2.fromOffset(8, 0)
+	UI.footerStatus.Font = Enum.Font.Gotham
+	UI.footerStatus.TextSize = 10
+	UI.footerStatus.TextXAlignment = Enum.TextXAlignment.Left
+	UI.footerStatus.TextColor3 = C.muted
+	UI.footerStatus.Text = "Active"
+	UI.footerStatus.Parent = footer
+
+	local pages = {}
+	local navItems = {}
+
+	local function makePage(name)
+		local page = Instance.new("ScrollingFrame")
+		page.Name = name
+		page.Size = UDim2.fromScale(1, 1)
+		page.BackgroundTransparency = 1
+		page.BorderSizePixel = 0
+		page.ScrollBarThickness = 4
+		page.CanvasSize = UDim2.fromOffset(0, 0)
+		page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		page.ScrollBarImageColor3 = C.accent
+		page.Visible = false
+		page.Parent = main
+		local list = Instance.new("UIListLayout")
+		list.Padding = UDim.new(0, 10)
+		list.SortOrder = Enum.SortOrder.LayoutOrder
+		list.Parent = page
+		local pad = Instance.new("UIPadding", page)
+		pad.PaddingTop = UDim.new(0, 8)
+		pad.PaddingBottom = UDim.new(0, 10)
+		pad.PaddingLeft = UDim.new(0, 8)
+		pad.PaddingRight = UDim.new(0, 8)
+		pages[name] = page
+		return page
+	end
+
+	local homePage = makePage("Home")
+	local farmPage = makePage("Farm")
+	local bpPage = makePage("Battle")
+	local miscPage = makePage("Misc")
+
+	local function selectNav(name)
+		UI.activeNav = name
+		for n, item in pairs(navItems) do
+			local active = n == name
+			item.BackgroundColor3 = active and C.cardInner or C.card
+			item.TextColor3 = active and C.accent or C.muted
+		end
+		for n, page in pairs(pages) do
+			page.Visible = n == name
+		end
+	end
+
+	local function makeNav(label, pageName)
+		local btn = Instance.new("TextButton")
+		btn.Size = UDim2.fromOffset(92, 34)
+		btn.BackgroundColor3 = C.card
+		btn.Text = label
+		btn.Font = Enum.Font.GothamMedium
+		btn.TextSize = 11
+		btn.TextColor3 = C.muted
+		btn.AutoButtonColor = false
+		btn.Parent = sidebar
+		corner(btn, 8)
+		navItems[pageName] = btn
+		btn.MouseButton1Click:Connect(function() selectNav(pageName) end)
+	end
+
+	makeNav("Home", "Home")
+	makeNav("Farm", "Farm")
+	makeNav("Battle", "Battle")
+	makeNav("Misc", "Misc")
+
+	local function sectionCard(parent, titleText)
+		local card = Instance.new("Frame")
+		card.Size = UDim2.new(1, 0, 0, 0)
+		card.AutomaticSize = Enum.AutomaticSize.Y
+		card.BackgroundColor3 = C.card
+		card.BorderSizePixel = 0
+		card.Parent = parent
+		corner(card, 10)
+		stroke(card, C.border, 1, 0.5)
+		local layout = Instance.new("UIListLayout")
+		layout.Padding = UDim.new(0, 8)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = card
+		local pad = Instance.new("UIPadding", card)
+		pad.PaddingTop = UDim.new(0, 12)
+		pad.PaddingBottom = UDim.new(0, 12)
+		pad.PaddingLeft = UDim.new(0, 12)
+		pad.PaddingRight = UDim.new(0, 12)
+		local heading = Instance.new("TextLabel")
+		heading.LayoutOrder = 1
+		heading.BackgroundTransparency = 1
+		heading.Size = UDim2.new(1, 0, 0, 18)
+		heading.Font = Enum.Font.GothamBold
+		heading.TextSize = 11
+		heading.TextXAlignment = Enum.TextXAlignment.Left
+		heading.TextColor3 = C.accent2
+		heading.Text = string.upper(titleText)
+		heading.Parent = card
+		local inner = Instance.new("Frame")
+		inner.LayoutOrder = 2
+		inner.Size = UDim2.new(1, 0, 0, 0)
+		inner.AutomaticSize = Enum.AutomaticSize.Y
+		inner.BackgroundTransparency = 1
+		inner.Parent = card
+		Instance.new("UIListLayout", inner).Padding = UDim.new(0, 6)
+		return inner
+	end
+
+	local function statRow(inner, label, color)
+		local row = Instance.new("Frame")
+		row.Size = UDim2.new(1, 0, 0, 28)
+		row.BackgroundColor3 = C.cardInner
+		row.BackgroundTransparency = 0.35
+		row.BorderSizePixel = 0
+		row.Parent = inner
+		corner(row, 8)
+		local name = Instance.new("TextLabel")
+		name.BackgroundTransparency = 1
+		name.Size = UDim2.new(0.55, 0, 1, 0)
+		name.Position = UDim2.fromOffset(10, 0)
+		name.Font = Enum.Font.Gotham
+		name.TextSize = 12
+		name.TextXAlignment = Enum.TextXAlignment.Left
+		name.TextColor3 = C.muted
+		name.Text = label
+		name.Parent = row
+		local value = Instance.new("TextLabel")
+		value.BackgroundTransparency = 1
+		value.Size = UDim2.new(0.45, -10, 1, 0)
+		value.Position = UDim2.new(0.55, 0, 0, 0)
+		value.Font = Enum.Font.GothamBold
+		value.TextSize = 12
+		value.TextXAlignment = Enum.TextXAlignment.Right
+		value.TextColor3 = color or C.text
+		value.Text = "..."
+		value.Parent = row
+		return value
+	end
+
+	local statsInner = sectionCard(homePage, "Live stats")
+	UI.vCash = statRow(statsInner, "Cash", C.green)
+	UI.vWaves = statRow(statsInner, "Waves", C.accent2)
+	UI.vBP = statRow(statsInner, "Battle Pass Lv", C.yellow)
+	UI.vUnits = statRow(statsInner, "Units", C.text)
+	UI.vBase = statRow(statsInner, "Base", C.muted)
+
+	local logInner = sectionCard(homePage, "Activity log")
+	UI.logLabel = Instance.new("TextLabel")
+	UI.logLabel.BackgroundTransparency = 1
+	UI.logLabel.Size = UDim2.new(1, 0, 0, 120)
+	UI.logLabel.Font = Enum.Font.Code
+	UI.logLabel.TextSize = 11
+	UI.logLabel.TextXAlignment = Enum.TextXAlignment.Left
+	UI.logLabel.TextYAlignment = Enum.TextYAlignment.Top
+	UI.logLabel.TextColor3 = C.muted
+	UI.logLabel.TextWrapped = true
+	UI.logLabel.Text = "Ready."
+	UI.logLabel.Parent = logInner
+
+	UI.statusLabel = Instance.new("TextLabel")
+	UI.statusLabel.BackgroundTransparency = 1
+	UI.statusLabel.Size = UDim2.new(1, 0, 0, 20)
+	UI.statusLabel.Font = Enum.Font.GothamBold
+	UI.statusLabel.TextSize = 12
+	UI.statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+	UI.statusLabel.TextColor3 = C.accent
+	UI.statusLabel.Text = "Status: Idle"
+	UI.statusLabel.Parent = logInner
+
+	local function makeToggle(inner, label, desc, key)
+		local card = Instance.new("Frame")
+		card.Size = UDim2.new(1, 0, 0, 0)
+		card.AutomaticSize = Enum.AutomaticSize.Y
+		card.BackgroundColor3 = C.cardInner
+		card.BorderSizePixel = 0
+		card.Parent = inner
+		corner(card, 8)
+		stroke(card, C.border, 1, 0.6)
+		local pad = Instance.new("UIPadding", card)
+		pad.PaddingTop = UDim.new(0, 8)
+		pad.PaddingBottom = UDim.new(0, 8)
+		pad.PaddingLeft = UDim.new(0, 10)
+		pad.PaddingRight = UDim.new(0, 10)
+		local row = Instance.new("Frame")
+		row.Size = UDim2.new(1, 0, 0, 22)
+		row.BackgroundTransparency = 1
+		row.Parent = card
+		local lbl = Instance.new("TextLabel")
+		lbl.BackgroundTransparency = 1
+		lbl.Size = UDim2.new(1, -52, 0, 22)
+		lbl.Font = Enum.Font.GothamBold
+		lbl.TextSize = 12
+		lbl.TextXAlignment = Enum.TextXAlignment.Left
+		lbl.TextColor3 = C.text
+		lbl.Text = label
+		lbl.Parent = row
+		local toggle = Instance.new("TextButton")
+		toggle.Size = UDim2.fromOffset(44, 22)
+		toggle.Position = UDim2.new(1, -44, 0, 0)
+		toggle.Font = Enum.Font.GothamBold
+		toggle.TextSize = 10
+		toggle.TextColor3 = C.text
+		toggle.AutoButtonColor = false
+		toggle.Parent = row
+		corner(toggle, 6)
+		local function refresh()
+			local on = State[key] == true
+			toggle.Text = on and "ON" or "OFF"
+			toggle.BackgroundColor3 = on and C.green or C.red
+		end
+		toggle.MouseButton1Click:Connect(function()
+			State[key] = not State[key]
+			if key == "fastRoll" and State[key] then
+				plr:SetAttribute("FastRoll", true)
+			end
+			if key == "bypassGamepass" or key == "bypassPremium" or key == "fastRoll" then
+				installBypassHooks()
+			end
+			refresh()
+			log(label .. " → " .. (State[key] and "ON" or "OFF"))
+		end)
+		refresh()
+		if desc and desc ~= "" then
+			local d = Instance.new("TextLabel")
+			d.BackgroundTransparency = 1
+			d.Size = UDim2.new(1, 0, 0, 0)
+			d.AutomaticSize = Enum.AutomaticSize.Y
+			d.Font = Enum.Font.Gotham
+			d.TextSize = 10
+			d.TextXAlignment = Enum.TextXAlignment.Left
+			d.TextColor3 = C.muted
+			d.TextWrapped = true
+			d.Text = desc
+			d.Parent = card
+		end
+	end
+
+	local farmInner = sectionCard(farmPage, "Automation")
+	makeToggle(farmInner, "Auto Roll", "Roll via AutoRoll + PopCharacters + roll button", "autoRoll")
+	makeToggle(farmInner, "Auto Buy", "Pickup rolled units on your base", "autoBuy")
+	makeToggle(farmInner, "Auto Place", "Place tools onto fighter slots", "autoPlace")
+	makeToggle(farmInner, "Auto Wave", "Fire StartWave when idle", "autoWave")
+	makeToggle(farmInner, "Auto Sell", "Fire sell NPC remotes", "autoSell")
+
+	local rollInner = sectionCard(farmPage, "Roll perks")
+	makeToggle(rollInner, "Fast Roll", "Keep FastRoll attribute + skip slow anim hook", "fastRoll")
+	makeToggle(rollInner, "Bypass Gamepass", "Hook roll/luck/speed gamepass checks", "bypassGamepass")
+	makeToggle(rollInner, "Skip Roll FX", "Block client KillCharacters VFX remote", "skipRollAnim")
+
+	local bpInner = sectionCard(bpPage, "Battle pass")
+	makeToggle(bpInner, "Auto Claim BP", "Sweep claim all 30 levels (free + premium tries)", "autoClaimBP")
+	makeToggle(bpInner, "Premium Bypass", "Also fire premium claim variants", "bypassPremium")
+	makeToggle(bpInner, "Auto Claim Quests", "Claim finished BP quests", "autoClaimQuest")
+
+	local miscInner = sectionCard(miscPage, "Extras")
+	makeToggle(miscInner, "Auto Spin Wheel", "Fire SpinWheel.Spin remote", "autoSpin")
+
+	local btnInner = sectionCard(miscPage, "Manual actions")
+	local function actionBtn(parent, text, fn)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(1, 0, 0, 32)
+		b.BackgroundColor3 = C.cardInner
+		b.Text = text
+		b.Font = Enum.Font.GothamBold
+		b.TextSize = 12
+		b.TextColor3 = C.text
+		b.AutoButtonColor = true
+		b.Parent = parent
+		corner(b, 8)
+		b.MouseButton1Click:Connect(fn)
+	end
+	actionBtn(btnInner, "Roll once", rollOnce)
+	actionBtn(btnInner, "Claim battle pass now", claimBattlepass)
+	actionBtn(btnInner, "Start wave now", tryStartWave)
+	actionBtn(btnInner, "Sell / dump units", trySellDuplicates)
+
+	selectNav("Home")
+
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then return end
+		if input.KeyCode == Enum.KeyCode.RightControl then
+			gui.Enabled = not gui.Enabled
+		end
+	end)
+
+	task.defer(function()
+		initDataClient()
+		installBypassHooks()
+		setStatus("Ready")
+	end)
+end
+
+buildUI()
+
+heartbeatConn = RunService.Heartbeat:Connect(function(dt)
+	UI.frames += 1
+	onHeartbeat(dt)
+end)
+
+while State.running and UI.gui and UI.gui.Parent do
+	if getgenv().SigmaStopRequested then
+		State.running = false
+		break
+	end
+	task.wait(0.25)
+end
+
+if heartbeatConn then
+	heartbeatConn:Disconnect()
+end
+getgenv().SigmaScriptsRunning = nil
+]=],
 }
 
 local EMBEDDED_ICON_BASE64 = ""
@@ -5022,7 +6101,22 @@ local SELL_LEMONS_UNIVERSE_ID = 7395930870
 local SELL_LEMONS_ICON_URL =
 	"https://tr.rbxcdn.com/180DAY-3d8fd895f358e86fb886c17fe06201d8/256/256/Image/Png/noFilter"
 
+local ANIME_DEFEND_PLACE_ID = 105031185134358
+local ANIME_DEFEND_UNIVERSE_ID = 10111742174
+
 local GAMES = {
+	{
+		id = "anime_defend",
+		name = "Defend ur base with anime",
+		subtitle = "Roll · Farm · Battle Pass",
+		keywords = { "anime", "defend", "base", "roll", "wave", "tower" },
+		placeIds = { ANIME_DEFEND_PLACE_ID },
+		status = "working",
+		placeId = ANIME_DEFEND_PLACE_ID,
+		universeId = ANIME_DEFEND_UNIVERSE_ID,
+		iconFallback = "⚔️",
+		file = "anime_defend.lua",
+	},
 	{
 		id = "sell_lemons",
 		name = "Sell Lemons",
@@ -5121,7 +6215,7 @@ local function cleanupSigmaScripts()
 		if not pg then
 			return
 		end
-		for _, name in ipairs({ "SellLemons", "SigmaHub", "LemonHub", "DestineHub" }) do
+		for _, name in ipairs({ "SellLemons", "AnimeDefend", "SigmaHub", "LemonHub", "DestineHub" }) do
 			local old = pg:FindFirstChild(name)
 			if old then
 				old:Destroy()
