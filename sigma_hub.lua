@@ -5020,55 +5020,59 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local plr = Players.LocalPlayer
 
-local CANDY_VERSION = "2026.06.23-v2"
+local CANDY_VERSION = "2026.06.23-v3"
 local PLACE_ID = 95082159892680
 
 if game.PlaceId ~= PLACE_ID then
 	warn("[CandyEscape] Wrong game — expected PlaceId " .. PLACE_ID)
 end
 
-local Remotes = game:GetService("ReplicatedStorage"):WaitForChild("Remotes", 5)
+local RemotesFolder = game:GetService("ReplicatedStorage"):WaitForChild("Remotes", 8)
 local function remote(name)
-	return Remotes and Remotes:FindFirstChild(name)
+	return RemotesFolder and RemotesFolder:FindFirstChild(name)
 end
 
 local S = {
 	speedHack = false,
-	speedVal = 300,
+	speedVal = 500,
+	serverSpeed = false,
 	jumpBoost = false,
-	jumpPower = 120,
+	jumpPower = 150,
 	fly = false,
-	flySpeed = 80,
+	flySpeed = 120,
 	noclip = false,
 	infiniteJump = false,
 	antiVoid = false,
 	godMode = false,
 	autoRun = false,
 	autoWin = false,
-	autoWinDelay = 1.5,
+	autoWinDelay = 1.2,
 	autoRebirth = false,
-	autoCollect = false,
+	autoTreadmill = false,
 	fullClear = false,
 	running = true,
 	logLines = {},
 }
 
 local UI = {}
+local World = { stages = {}, winBlocks = {}, checkpoints = {} }
+local Spy = { logs = {} }
 
+-- ── helpers ────────────────────────────────────────────────────────────────
 local function getChar()
-	return plr.Character or plr.CharacterAdded:Wait()
+	return plr.Character
 end
 local function getHRP()
-	local c = plr.Character
+	local c = getChar()
 	return c and c:FindFirstChild("HumanoidRootPart")
 end
 local function getHum()
-	local c = plr.Character
+	local c = getChar()
 	return c and c:FindFirstChildOfClass("Humanoid")
 end
 
 local function log(msg)
-	if #S.logLines >= 60 then
+	if #S.logLines >= 80 then
 		table.remove(S.logLines, 1)
 	end
 	table.insert(S.logLines, os.date("%H:%M:%S") .. "  " .. msg)
@@ -5078,7 +5082,7 @@ local function log(msg)
 				c:Destroy()
 			end
 		end
-		for i = #S.logLines, math.max(1, #S.logLines - 8), -1 do
+		for i = #S.logLines, math.max(1, #S.logLines - 10), -1 do
 			local lbl = Instance.new("TextLabel")
 			lbl.BackgroundTransparency = 1
 			lbl.Size = UDim2.new(1, 0, 0, 14)
@@ -5101,12 +5105,25 @@ local function setStatus(text, color)
 	end
 end
 
--- ── Stage / win data ───────────────────────────────────────────────────────
-local STAGE_SPAWNS = {
-	{ name = "HUB", pos = Vector3.new(0, 7, 0) },
-	{ name = "Stage 1", pos = Vector3.new(-23, 25, 110) },
-	{ name = "Stage 2", pos = Vector3.new(2, 8, 282) },
-	{ name = "Stage 3", pos = Vector3.new(2, 8, 507) },
+local STAGE_ANCHORS = {
+	Hub = Vector3.new(1.87, 8.4, 7.76),
+	Stage0_HUB = Vector3.new(1.87, 8.4, 7.76),
+	Stage1 = Vector3.new(-23, 22, 110),
+	Stage2 = Vector3.new(-16.5, 8, 285),
+	Stage3 = Vector3.new(-16.5, 8, 507),
+	Stage4 = Vector3.new(0, 15, 650),
+	Stage5 = Vector3.new(0, 15, 800),
+	Stage6 = Vector3.new(0, 15, 950),
+	Stage7 = Vector3.new(0, 15, 1100),
+	Stage8 = Vector3.new(0, 15, 1250),
+	Stage9 = Vector3.new(0, 15, 1400),
+	Stage10 = Vector3.new(0, 15, 1550),
+	Stage11 = Vector3.new(0, 15, 1700),
+	Stage12 = Vector3.new(0, 15, 1850),
+	Stage13 = Vector3.new(-5898, 465, 1569),
+	Stage14 = Vector3.new(-6200, 480, 1700),
+	Stage15 = Vector3.new(-6500, 500, 1850),
+	Level15 = Vector3.new(-6800, 500, 2000),
 }
 
 local STAGE_ORDER = {
@@ -5115,157 +5132,442 @@ local STAGE_ORDER = {
 	"Stage12", "Stage13", "Stage14", "Stage15", "Level15",
 }
 
-local function findStagePos(stageName)
-	local structure = workspace:FindFirstChild("Structure")
-	if not structure then
-		return nil
+local SKIP_PART_NAMES = {
+	Deco = true,
+	Transparent = true,
+	Mur = true,
+	Pillier = true,
+	Highlight = true,
+}
+
+local function partScore(name, inst)
+	if SKIP_PART_NAMES[name] or name:find("Deco") or name:find("Transparent") then
+		return -999
 	end
-	local stage = structure:FindFirstChild(stageName)
-	if not stage then
-		return nil
+	if inst:IsA("SpawnLocation") then
+		return 100
 	end
-	for _, p in ipairs(stage:GetDescendants()) do
-		if p:IsA("SpawnLocation") then
-			return p.Position + Vector3.new(0, 4, 0)
-		end
+	if name:find("WinBlock") then
+		return 98
 	end
-	for _, p in ipairs(stage:GetDescendants()) do
-		if p:IsA("BasePart") then
-			return p.Position + Vector3.new(0, 4, 0)
-		end
+	if name:find("SkipTo") then
+		return 95
 	end
-	return nil
+	if name:find("Spawn") or name:find("Start") then
+		return 90
+	end
+	if name:find("Cadriage") or name:find("Keycaps") then
+		return 75
+	end
+	if name:find("Floor") or name:find("Sol") or name:find("Platform") then
+		return 65
+	end
+	if inst.Size.Magnitude > 20 then
+		return 40
+	end
+	return 15
 end
 
-local function findWinBlocks()
-	local found = {}
-	local structure = workspace:FindFirstChild("Structure")
-	if structure then
-		for _, v in ipairs(structure:GetDescendants()) do
-			if v:IsA("BasePart") and v.Name:find("Win") then
-				table.insert(found, v.Position + Vector3.new(0, 3, 0))
+local function streamTo(pos)
+	pcall(function()
+		plr:RequestStreamAroundAsync(pos)
+	end)
+	task.wait(0.25)
+end
+
+local function zeroVelocity(char)
+	if not char then
+		return
+	end
+	for _, p in ipairs(char:GetDescendants()) do
+		if p:IsA("BasePart") then
+			p.AssemblyLinearVelocity = Vector3.zero
+			p.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+end
+
+function World.getHubCFrame()
+	local ps = workspace:FindFirstChild("PersistentSpawn")
+	if ps then
+		local sl = ps:FindFirstChildWhichIsA("SpawnLocation", true)
+		if sl then
+			return sl.CFrame + Vector3.new(0, 4, 0)
+		end
+	end
+	local sl = workspace:FindFirstChildWhichIsA("SpawnLocation", true)
+	if sl then
+		return sl.CFrame + Vector3.new(0, 4, 0)
+	end
+	return CFrame.new(STAGE_ANCHORS.Hub)
+end
+
+function World.safeTp(target)
+	local char = getChar()
+	if not char then
+		return false, "no character"
+	end
+	local cf = typeof(target) == "CFrame" and target or CFrame.new(target)
+	streamTo(cf.Position)
+	zeroVelocity(char)
+	char:PivotTo(cf)
+	local hrp = getHRP()
+	if hrp then
+		hrp.CFrame = cf
+		zeroVelocity(char)
+	end
+	return true
+end
+
+function World.fireTouch(part)
+	local hrp = getHRP()
+	if not hrp or not part or not part:IsA("BasePart") then
+		return
+	end
+	if firetouchinterest then
+		firetouchinterest(hrp, part, 0)
+		task.wait()
+		firetouchinterest(hrp, part, 1)
+	else
+		World.safeTp(part.CFrame + Vector3.new(0, 2, 0))
+	end
+end
+
+function World.firePrompt(part)
+	if not part then
+		return
+	end
+	local prompt = part:FindFirstChildOfClass("ProximityPrompt")
+	if prompt and fireproximityprompt then
+		fireproximityprompt(prompt)
+	end
+end
+
+function World.fireRemote(name, ...)
+	local r = remote(name)
+	if not r then
+		return false
+	end
+	local args = { ... }
+	return pcall(function()
+		if r:IsA("RemoteEvent") then
+			r:FireServer(table.unpack(args))
+		else
+			r:InvokeServer(table.unpack(args))
+		end
+	end)
+end
+
+function World.scan()
+	World.stages = {}
+	World.winBlocks = {}
+	World.checkpoints = {}
+
+	local cp = workspace:FindFirstChild("Checkpoints")
+	local spawns = cp and cp:FindFirstChild("Spawns")
+	if spawns then
+		for _, part in ipairs(spawns:GetChildren()) do
+			if part:IsA("BasePart") then
+				World.checkpoints[part.Name] = part
 			end
 		end
 	end
-	table.sort(found, function(a, b)
-		return a.Z < b.Z
-	end)
-	return found
-end
 
-local function tpTo(pos)
-	local hrp = getHRP()
-	if hrp and pos then
-		hrp.CFrame = CFrame.new(pos)
-	end
-end
-
-local function tpToStage(index)
-	local entry = STAGE_SPAWNS[index]
-	if entry then
-		tpTo(entry.pos + Vector3.new(0, 3, 0))
-		log("TP → " .. entry.name)
-		setStatus("Teleported to " .. entry.name)
-	end
-end
-
-local function tpToLastStage()
-	for i = #STAGE_ORDER, 1, -1 do
-		local pos = findStagePos(STAGE_ORDER[i])
-		if pos then
-			tpTo(pos)
-			log("TP → " .. STAGE_ORDER[i])
-			setStatus("Teleported to " .. STAGE_ORDER[i])
-			return
+	local ppFolder = cp and cp:FindFirstChild("ProximityPrompt")
+	if ppFolder then
+		for _, part in ipairs(ppFolder:GetChildren()) do
+			if part:IsA("BasePart") then
+				World.checkpoints[part.Name] = part
+			end
 		end
 	end
-	tpTo(Vector3.new(0, 50, 1000))
+
+	for _, stageName in ipairs(STAGE_ORDER) do
+		local anchor = STAGE_ANCHORS[stageName]
+		if anchor then
+			streamTo(anchor)
+		end
+		local structure = workspace:FindFirstChild("Structure")
+		local stage = structure and structure:FindFirstChild(stageName)
+		local bestPart, bestScore = nil, -math.huge
+		if stage then
+			for _, d in ipairs(stage:GetDescendants()) do
+				if d:IsA("BasePart") then
+					local score = partScore(d.Name, d)
+					if score > bestScore then
+						bestScore = score
+						bestPart = d
+					end
+				end
+			end
+		end
+		if bestPart then
+			World.stages[stageName] = bestPart
+		elseif anchor then
+			World.stages[stageName] = { Position = anchor, _virtual = true }
+		end
+	end
+
+	for _, v in ipairs(workspace:GetDescendants()) do
+		if v:IsA("BasePart") and v.Name:find("WinBlock") then
+			table.insert(World.winBlocks, v)
+		end
+	end
+	table.sort(World.winBlocks, function(a, b)
+		return a.Position.Z < b.Position.Z
+	end)
+
+	local stageCount = 0
+	for _ in pairs(World.stages) do
+		stageCount += 1
+	end
+	log("World scan: " .. tostring(#World.winBlocks) .. " wins, " .. tostring(stageCount) .. " stages")
+	setStatus("World scanned")
 end
 
-local function tpCheckpoint(name)
+function World.getStageCFrame(stageName)
+	if World.checkpoints[stageName] and World.checkpoints[stageName]:IsA("BasePart") then
+		return World.checkpoints[stageName].CFrame + Vector3.new(0, 4, 0)
+	end
+	local skip = World.checkpoints["SkipTo" .. stageName] or World.checkpoints["SkipToStage" .. (stageName:match("%d+") or "")]
+	if skip and skip:IsA("BasePart") then
+		return skip.CFrame + Vector3.new(0, 4, 0)
+	end
+	local cached = World.stages[stageName]
+	if cached then
+		if cached._virtual then
+			return CFrame.new(cached.Position)
+		end
+		return cached.CFrame + Vector3.new(0, 4, 0)
+	end
+	local anchor = STAGE_ANCHORS[stageName]
+	if anchor then
+		streamTo(anchor)
+		return CFrame.new(anchor)
+	end
+end
+
+function World.tpStage(stageName)
+	local cf = World.getStageCFrame(stageName)
+	if not cf then
+		setStatus("Stage not found: " .. stageName, C.red)
+		return false
+	end
+	World.safeTp(cf)
+	log("TP → " .. stageName)
+	setStatus("Teleported to " .. stageName)
+	return true
+end
+
+function World.tpHub()
+	World.safeTp(World.getHubCFrame())
+	log("TP → HUB")
+	setStatus("Teleported to HUB")
+end
+
+function World.requestCheckpoint(stageName)
+	local num = stageName:match("(%d+)")
+	local tries = {
+		stageName,
+		num and tonumber(num),
+		num and ("Stage" .. num),
+	}
+	for _, arg in ipairs(tries) do
+		if arg then
+			World.fireRemote("RequestCheckpointTp", arg)
+		end
+	end
+	task.wait(0.15)
+	World.tpStage(stageName)
+end
+
+function World.skipStage(num)
+	local name = "SkipToStage" .. tostring(num)
 	local cp = workspace:FindFirstChild("Checkpoints")
-	local spawns = cp and cp:FindFirstChild("Spawns")
-	local part = spawns and spawns:FindFirstChild(name)
+	local ppFolder = cp and cp:FindFirstChild("ProximityPrompt")
+	local part = ppFolder and ppFolder:FindFirstChild(name)
 	if part then
-		tpTo(part.Position + Vector3.new(0, 3, 0))
-		log("Checkpoint → " .. name)
-		return
+		World.firePrompt(part)
+		World.safeTp(part.CFrame + Vector3.new(0, 4, 0))
 	end
-	local rem = remote("RequestCheckpointTp")
-	if rem then
-		pcall(function()
-			rem:FireServer(name)
-		end)
-		log("Requested checkpoint " .. name)
-	end
+	World.requestCheckpoint("Stage" .. tostring(num))
+	log("Skip → Stage " .. num)
 end
 
-local function doInstantWin()
-	local hrp = getHRP()
-	if not hrp then
+function World.applyServerSpeed(val)
+	World.fireRemote("SetCustomSpeed", val)
+	World.fireRemote("UpdateSpeed", val)
+end
+
+function World.farmWinOnce()
+	if #World.winBlocks == 0 then
+		World.scan()
+	end
+	local block = World.winBlocks[1]
+	if not block then
+		setStatus("No WinBlock found — rescan world", C.red)
 		return
 	end
-	local blocks = findWinBlocks()
-	if #blocks == 0 then
-		setStatus("No win blocks found", C.red)
+	World.safeTp(block.CFrame + Vector3.new(0, 3, 0))
+	task.wait(0.12)
+	World.fireTouch(block)
+	World.fireRemote("ShowWin")
+	World.fireRemote("AddWin")
+	task.wait(0.15)
+	World.tpHub()
+end
+
+function World.instantWin()
+	if #World.winBlocks == 0 then
+		World.scan()
+	end
+	local block = World.winBlocks[#World.winBlocks] or World.winBlocks[1]
+	if not block then
+		setStatus("No win block", C.red)
 		return
 	end
-	tpTo(blocks[#blocks])
-	task.wait(0.2)
-	local rem = remote("AddWin")
-	if rem then
-		pcall(function()
-			rem:FireServer()
-		end)
-	end
-	log("Instant win triggered")
+	World.safeTp(block.CFrame + Vector3.new(0, 3, 0))
+	task.wait(0.1)
+	World.fireTouch(block)
+	World.fireRemote("ShowWin")
+	World.fireRemote("AddWin")
+	log("Instant win fired")
 	setStatus("Win triggered")
 end
 
-local function doSingleWin()
-	local hrp = getHRP()
-	if not hrp then
-		return
-	end
-	local blocks = findWinBlocks()
-	if #blocks == 0 then
-		return
-	end
-	tpTo(blocks[1])
-	task.wait(0.25)
-	tpTo(STAGE_SPAWNS[1].pos)
+function World.fullClear()
+	task.spawn(function()
+		for _, stageName in ipairs(STAGE_ORDER) do
+			if not S.fullClear then
+				break
+			end
+			World.tpStage(stageName)
+			task.wait(0.35)
+		end
+		if #World.winBlocks == 0 then
+			World.scan()
+		end
+		local last = World.winBlocks[#World.winBlocks]
+		if last then
+			World.safeTp(last.CFrame + Vector3.new(0, 3, 0))
+			World.fireTouch(last)
+		end
+		S.fullClear = false
+		if UI.toggleRefresh then
+			UI.toggleRefresh("fullClear")
+		end
+		log("Full clear finished")
+		setStatus("Obby cleared")
+	end)
 end
 
-local function tryRebirth()
-	local rem = remote("Rebirth")
-	if rem then
-		pcall(function()
-			rem:FireServer()
+function World.tryRebirth()
+	World.fireRemote("Rebirth")
+end
+
+function World.spamTreadmill()
+	World.fireRemote("TreadmillSignal")
+	World.fireRemote("CheckGoldTreadmill")
+	World.fireRemote("HourlyTreadmillEvent")
+end
+
+-- ── remote spy (Simple Spy style) ─────────────────────────────────────────
+local function formatArg(v)
+	local t = typeof(v)
+	if t == "string" then
+		return '"' .. v .. '"'
+	elseif t == "number" or t == "boolean" then
+		return tostring(v)
+	elseif t == "Instance" then
+		return v.ClassName .. ":" .. v.Name
+	end
+	return t
+end
+
+local function formatArgs(args)
+	local out = {}
+	for i = 1, math.min(#args, 4) do
+		out[i] = formatArg(args[i])
+	end
+	return table.concat(out, ", ")
+end
+
+local function refreshSpyUI()
+	if not UI.spyFrame then
+		return
+	end
+	for _, c in ipairs(UI.spyFrame:GetChildren()) do
+		if c:IsA("TextLabel") then
+			c:Destroy()
+		end
+	end
+	for i, entry in ipairs(Spy.logs) do
+		if i > 12 then
+			break
+		end
+		local lbl = Instance.new("TextLabel")
+		lbl.BackgroundTransparency = 1
+		lbl.Size = UDim2.new(1, 0, 0, 28)
+		lbl.Font = Enum.Font.Code
+		lbl.TextSize = 9
+		lbl.TextXAlignment = Enum.TextXAlignment.Left
+		lbl.TextYAlignment = Enum.TextYAlignment.Top
+		lbl.TextWrapped = true
+		lbl.TextColor3 = entry.method == "FireServer" and Color3.fromRGB(255, 180, 120) or Color3.fromRGB(160, 220, 255)
+		lbl.Text = entry.remote .. "(" .. entry.argText .. ")"
+		lbl.LayoutOrder = i
+		lbl.Parent = UI.spyFrame
+	end
+end
+
+UI.refreshSpy = refreshSpyUI
+
+local function installRemoteSpy()
+	if getgenv().SigmaCandySpyHook then
+		return
+	end
+	if not (hookmetamethod and getnamecallmethod) then
+		log("Remote spy unavailable (no hookmetamethod)")
+		return
+	end
+	getgenv().SigmaCandySpyHook = true
+	local old
+	old = hookmetamethod(game, "__namecall", function(self, ...)
+		local method = getnamecallmethod()
+		if (method == "FireServer" or method == "InvokeServer") and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
+			local args = { ... }
+			table.insert(Spy.logs, 1, {
+				remote = self.Name,
+				path = self:GetFullName(),
+				method = method,
+				args = args,
+				argText = formatArgs(args),
+			})
+			if #Spy.logs > 30 then
+				table.remove(Spy.logs)
+			end
+			task.defer(refreshSpyUI)
+		end
+		return old(self, ...)
+	end)
+	log("Remote spy active")
+end
+
+local function hookSpeedRemote()
+	local upd = remote("UpdateSpeed")
+	if upd and upd:IsA("RemoteEvent") then
+		upd.OnClientEvent:Connect(function()
+			if S.speedHack then
+				local hum = getHum()
+				if hum then
+					hum.WalkSpeed = S.speedVal
+				end
+			end
 		end)
 	end
 end
 
-local function collectNearbyCurrency()
-	local hrp = getHRP()
-	if not hrp then
-		return
-	end
-	local rem = remote("CurrencyCollect")
-	if not rem then
-		return
-	end
-	for _, v in ipairs(workspace:GetDescendants()) do
-		if v:IsA("BasePart") and (v.Name:lower():find("coin") or v.Name:lower():find("candy") or v.Name:lower():find("sugar")) then
-			if (v.Position - hrp.Position).Magnitude < 80 then
-				pcall(function()
-					rem:FireServer(v)
-				end)
-			end
-		end
-	end
-end
-
--- ── Feature loops ──────────────────────────────────────────────────────────
+-- ── movement loops ─────────────────────────────────────────────────────────
 local flyConn, noclipConn, speedConn, jumpConn, antiVoidConn, godConn, autoRunConn
 local lastSafePos
 
@@ -5342,7 +5644,7 @@ local function startNoclip()
 		if not S.noclip then
 			return
 		end
-		local c = plr.Character
+		local c = getChar()
 		if not c then
 			return
 		end
@@ -5368,6 +5670,9 @@ local function ensureSpeedConn()
 		end
 		if S.jumpBoost and hum.JumpPower ~= S.jumpPower then
 			hum.JumpPower = S.jumpPower
+		end
+		if S.serverSpeed then
+			World.applyServerSpeed(S.speedVal)
 		end
 	end)
 end
@@ -5398,12 +5703,12 @@ local function ensureAntiVoidConn()
 		if not hrp then
 			return
 		end
-		if hrp.Position.Y > -50 and hrp.Position.Y < 2500 then
+		if hrp.Position.Y > -50 and hrp.Position.Y < 4000 then
 			lastSafePos = hrp.CFrame
 		elseif lastSafePos then
-			hrp.CFrame = lastSafePos
+			World.safeTp(lastSafePos)
 		else
-			hrp.CFrame = CFrame.new(0, 10, 0)
+			World.safeTp(World.getHubCFrame())
 		end
 	end)
 end
@@ -5434,7 +5739,7 @@ local function ensureAutoRunConn()
 		local hum = getHum()
 		local hrp = getHRP()
 		if hum and hrp then
-			hum:Move(Vector3.new(0, 0, -1), false)
+			hum:Move(hrp.CFrame.LookVector, false)
 		end
 	end)
 end
@@ -5442,38 +5747,16 @@ end
 task.spawn(function()
 	while S.running do
 		if S.autoWin then
-			pcall(doSingleWin)
-			task.wait(math.max(0.5, S.autoWinDelay))
-		elseif S.fullClear then
-			for _, stageName in ipairs(STAGE_ORDER) do
-				if not S.fullClear then
-					break
-				end
-				local pos = findStagePos(stageName)
-				if pos then
-					tpTo(pos)
-					log("Clearing → " .. stageName)
-					task.wait(0.4)
-				end
-			end
-			local wins = findWinBlocks()
-			if wins[#wins] then
-				tpTo(wins[#wins])
-			end
-			S.fullClear = false
-			if UI.toggleRefresh then
-				UI.toggleRefresh("fullClear")
-			end
-			log("Full obby clear done")
-			setStatus("Obby cleared")
+			pcall(World.farmWinOnce)
+			task.wait(math.max(0.6, S.autoWinDelay))
 		elseif S.autoRebirth then
-			pcall(tryRebirth)
+			pcall(World.tryRebirth)
 			task.wait(3)
-		elseif S.autoCollect then
-			pcall(collectNearbyCurrency)
-			task.wait(0.5)
+		elseif S.autoTreadmill then
+			pcall(World.spamTreadmill)
+			task.wait(1)
 		else
-			task.wait(0.25)
+			task.wait(0.2)
 		end
 	end
 end)
@@ -5641,7 +5924,6 @@ body.BackgroundTransparency = 1
 body.Parent = root
 
 local sidebar = Instance.new("Frame")
-sidebar.Size = UDim2.fromOffset(108, 1)
 sidebar.Size = UDim2.new(0, 108, 1, -28)
 sidebar.BackgroundColor3 = C.sidebar
 sidebar.BackgroundTransparency = 0.04
@@ -5861,30 +6143,24 @@ local function makeToggle(parent, labelText, descText, key, emoji)
 		local v = not S[key]
 		S[key] = v
 		refreshToggle(key)
-		if key == "speedHack" or key == "jumpBoost" then
+		if key == "speedHack" or key == "jumpBoost" or key == "serverSpeed" then
 			ensureSpeedConn()
-			log(labelText .. " " .. (v and "ON" or "OFF"))
 		elseif key == "fly" then
 			if v then startFly() else stopFly() end
-			log(labelText .. " " .. (v and "ON" or "OFF"))
 		elseif key == "noclip" then
 			if v then startNoclip() else stopNoclip() end
-			log(labelText .. " " .. (v and "ON" or "OFF"))
 		elseif key == "infiniteJump" then
 			if v then ensureJumpConn() end
-			log(labelText .. " " .. (v and "ON" or "OFF"))
 		elseif key == "antiVoid" then
 			if v then ensureAntiVoidConn() end
-			log(labelText .. " " .. (v and "ON" or "OFF"))
 		elseif key == "godMode" then
 			if v then ensureGodConn() end
-			log(labelText .. " " .. (v and "ON" or "OFF"))
 		elseif key == "autoRun" then
 			if v then ensureAutoRunConn() end
-			log(labelText .. " " .. (v and "ON" or "OFF"))
-		else
-			log(labelText .. " " .. (v and "ON" or "OFF"))
+		elseif key == "fullClear" and v then
+			World.fullClear()
 		end
+		log(labelText .. " " .. (v and "ON" or "OFF"))
 		setStatus(labelText .. (v and " enabled" or " disabled"))
 	end
 
@@ -5995,18 +6271,54 @@ local function makeNavBtn(text, pageName)
 	end)
 end
 
--- Pages
+local function rebuildStageButtons(parent)
+	for _, c in ipairs(parent:GetChildren()) do
+		if c:IsA("GuiObject") and c.Name == "StageBtn" then
+			c:Destroy()
+		end
+	end
+	local grid = Instance.new("Frame")
+	grid.Name = "StageGrid"
+	grid.Size = UDim2.new(1, 0, 0, 0)
+	grid.AutomaticSize = Enum.AutomaticSize.Y
+	grid.BackgroundTransparency = 1
+	grid.Parent = parent
+	local layout = Instance.new("UIGridLayout")
+	layout.CellSize = UDim2.fromOffset(96, 30)
+	layout.CellPadding = UDim2.fromOffset(6, 6)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = grid
+	for _, stageName in ipairs(STAGE_ORDER) do
+		if World.stages[stageName] or World.checkpoints[stageName] or STAGE_ANCHORS[stageName] then
+			local b = Instance.new("TextButton")
+			b.Name = "StageBtn"
+			b.BackgroundColor3 = C.cardInner
+			b.Text = stageName:gsub("Stage0_HUB", "HUB")
+			b.Font = Enum.Font.GothamBold
+			b.TextSize = 9
+			b.TextColor3 = C.text
+			b.AutoButtonColor = true
+			b.Parent = grid
+			corner(b, 6)
+			b.MouseButton1Click:Connect(function()
+				World.tpStage(stageName)
+			end)
+		end
+	end
+end
+
 pages.main = makePage("Main")
+pages.exploit = makePage("Exploit")
 pages.move = makePage("Move")
-pages.auto = makePage("Auto")
 pages.tp = makePage("TP")
+pages.spy = makePage("Spy")
 
 makeNavBtn("Main", "main")
+makeNavBtn("Exploit", "exploit")
 makeNavBtn("Move", "move")
-makeNavBtn("Auto", "auto")
 makeNavBtn("TP", "tp")
+makeNavBtn("Spy", "spy")
 
--- MAIN tab
 local statsCard = sectionCard(pages.main, "Live Stats", "📊")
 local stats = readStats()
 UI.speedStat = Instance.new("TextLabel")
@@ -6040,28 +6352,32 @@ UI.rebirthStat.Text = "Rebirths: " .. stats.rebirths
 UI.rebirthStat.Parent = statsCard
 
 local quickCard = sectionCard(pages.main, "Quick Actions", "⚡")
-makeActionBtn(quickCard, "🏆  Instant Win", C.accent, function()
-	doInstantWin()
+makeActionBtn(quickCard, "🔍  Scan World (fix TPs)", C.accent2, function()
+	task.spawn(World.scan)
 end)
-makeActionBtn(quickCard, "🚀  TP to End", Color3.fromRGB(90, 50, 130), function()
-	tpToLastStage()
-end)
-makeActionBtn(quickCard, "✅  Enable All Movement", Color3.fromRGB(50, 120, 90), function()
-	for _, k in ipairs({ "speedHack", "infiniteJump", "antiVoid", "noclip" }) do
-		S[k] = true
+makeActionBtn(quickCard, "🏆  Instant Win", C.accent, World.instantWin)
+makeActionBtn(quickCard, "🔄  Farm 1 Win", Color3.fromRGB(90, 50, 130), World.farmWinOnce)
+makeActionBtn(quickCard, "✅  Enable OP Pack", Color3.fromRGB(50, 120, 90), function()
+	S.speedHack = true
+	S.serverSpeed = true
+	S.infiniteJump = true
+	S.antiVoid = true
+	S.noclip = true
+	for _, k in ipairs({ "speedHack", "serverSpeed", "infiniteJump", "antiVoid", "noclip" }) do
 		refreshToggle(k)
 	end
 	ensureSpeedConn()
 	ensureJumpConn()
 	ensureAntiVoidConn()
 	startNoclip()
-	log("Enabled all movement")
-	setStatus("All movement ON")
+	World.applyServerSpeed(S.speedVal)
+	log("OP pack enabled")
+	setStatus("OP pack ON")
 end)
 
 local logCard = sectionCard(pages.main, "Log", "📝")
 UI.logFrame = Instance.new("Frame")
-UI.logFrame.Size = UDim2.new(1, 0, 0, 120)
+UI.logFrame.Size = UDim2.new(1, 0, 0, 110)
 UI.logFrame.BackgroundColor3 = Color3.fromRGB(10, 6, 16)
 UI.logFrame.BorderSizePixel = 0
 UI.logFrame.Parent = logCard
@@ -6071,109 +6387,89 @@ logLayout.Padding = UDim.new(0, 1)
 logLayout.SortOrder = Enum.SortOrder.LayoutOrder
 logLayout.Parent = UI.logFrame
 
--- MOVE tab
-local moveCard = sectionCard(pages.move, "Movement", "🏃")
-makeToggle(moveCard, "Speed Hack", "Bypass speed cap — no gamepass needed", "speedHack", "⚡")
-makeSlider(moveCard, "Walk Speed", 16, 3000,
+local exploitCard = sectionCard(pages.exploit, "Overpowered", "💥")
+makeToggle(exploitCard, "Speed Hack", "Client walkspeed override", "speedHack", "⚡")
+makeToggle(exploitCard, "Server Speed Bypass", "Fires SetCustomSpeed + UpdateSpeed", "serverSpeed", "🚀")
+makeSlider(exploitCard, "Speed Value", 16, 5000,
 	function() return S.speedVal end,
 	function(v) S.speedVal = math.floor(v) end,
 	function(v) return tostring(math.floor(v)) end)
-makeToggle(moveCard, "Jump Boost", "Higher jump power", "jumpBoost", "🦘")
+makeToggle(exploitCard, "Auto-Win Farm", "Touch WinBlock loop", "autoWin", "🏆")
+makeSlider(exploitCard, "Win Delay", 0.5, 5,
+	function() return S.autoWinDelay end,
+	function(v) S.autoWinDelay = v end,
+	function(v) return string.format("%.1f", v) end)
+makeToggle(exploitCard, "Auto-Rebirth", "Spam Rebirth remote", "autoRebirth", "♻")
+makeToggle(exploitCard, "Auto Treadmill", "Spam treadmill remotes", "autoTreadmill", "🏋")
+makeToggle(exploitCard, "Full Obby Clear", "TP every stage then win", "fullClear", "🗺")
+makeActionBtn(exploitCard, "💰 Fire AddWin Remote", Color3.fromRGB(120, 80, 40), function()
+	World.fireRemote("AddWin")
+	log("AddWin fired")
+end)
+
+local moveCard = sectionCard(pages.move, "Movement", "🏃")
+makeToggle(moveCard, "Fly", "WASD + Space/Shift", "fly", "🕊")
+makeSlider(moveCard, "Fly Speed", 20, 400,
+	function() return S.flySpeed end,
+	function(v) S.flySpeed = math.floor(v) end,
+	function(v) return tostring(math.floor(v)) end)
+makeToggle(moveCard, "Noclip", "No collision", "noclip", "👻")
+makeToggle(moveCard, "Infinite Jump", "Jump in air", "infiniteJump", "⬆")
+makeToggle(moveCard, "Jump Boost", "Higher jump", "jumpBoost", "🦘")
 makeSlider(moveCard, "Jump Power", 50, 500,
 	function() return S.jumpPower end,
 	function(v) S.jumpPower = math.floor(v) end,
 	function(v) return tostring(math.floor(v)) end)
-makeToggle(moveCard, "Fly", "WASD + Space/Shift", "fly", "🕊")
-makeSlider(moveCard, "Fly Speed", 20, 300,
-	function() return S.flySpeed end,
-	function(v) S.flySpeed = math.floor(v) end,
-	function(v) return tostring(math.floor(v)) end)
-makeToggle(moveCard, "Noclip", "Walk through walls", "noclip", "👻")
-makeToggle(moveCard, "Infinite Jump", "Jump in mid-air", "infiniteJump", "⬆")
-makeToggle(moveCard, "Anti-Void", "Rescue if you fall", "antiVoid", "🛡")
-makeToggle(moveCard, "God Mode", "Keep health full", "godMode", "❤")
-makeToggle(moveCard, "Auto Run", "Always run forward (+1 speed)", "autoRun", "🏃")
+makeToggle(moveCard, "Anti-Void", "Rescue on fall", "antiVoid", "🛡")
+makeToggle(moveCard, "God Mode", "Full health", "godMode", "❤")
+makeToggle(moveCard, "Auto Run", "Run forward for +1 speed", "autoRun", "🏃")
 
--- AUTO tab
-local autoCard = sectionCard(pages.auto, "Automation", "🤖")
-makeToggle(autoCard, "Auto-Win Farm", "Farm wins via WinBlock TP loop", "autoWin", "🏆")
-makeSlider(autoCard, "Win Delay (sec)", 0.5, 5,
-	function() return S.autoWinDelay end,
-	function(v) S.autoWinDelay = v end,
-	function(v) return string.format("%.1f", v) end)
-makeToggle(autoCard, "Auto-Rebirth", "Rebirth when possible", "autoRebirth", "♻")
-makeToggle(autoCard, "Auto Collect", "Collect nearby candy/coins", "autoCollect", "🍬")
-makeToggle(autoCard, "Full Obby Clear", "TP through every stage to end", "fullClear", "🗺")
-
--- TP tab
 local tpCard = sectionCard(pages.tp, "Teleport", "📍")
-makeActionBtn(tpCard, "⚡  TP to Last Stage", C.accent2, tpToLastStage)
-makeActionBtn(tpCard, "🏠  TP to HUB", C.cardInner, function()
-	tpToStage(1)
-end)
-makeActionBtn(tpCard, "📌  Checkpoint Stage 2", C.cardInner, function()
-	tpCheckpoint("Stage2")
-end)
-makeActionBtn(tpCard, "📌  Checkpoint Stage 3", C.cardInner, function()
-	tpCheckpoint("Stage3")
-end)
-
-local stageGrid = Instance.new("Frame")
-stageGrid.Size = UDim2.new(1, 0, 0, 0)
-stageGrid.AutomaticSize = Enum.AutomaticSize.Y
-stageGrid.BackgroundTransparency = 1
-stageGrid.Parent = tpCard
-
-local grid = Instance.new("UIGridLayout")
-grid.CellSize = UDim2.fromOffset(96, 32)
-grid.CellPadding = UDim2.fromOffset(6, 6)
-grid.SortOrder = Enum.SortOrder.LayoutOrder
-grid.Parent = stageGrid
-
-for i, entry in ipairs(STAGE_SPAWNS) do
-	local b = Instance.new("TextButton")
-	b.BackgroundColor3 = C.cardInner
-	b.Text = entry.name
-	b.Font = Enum.Font.GothamBold
-	b.TextSize = 10
-	b.TextColor3 = C.text
-	b.AutoButtonColor = true
-	b.Parent = stageGrid
-	corner(b, 6)
-	b.MouseButton1Click:Connect(function()
-		tpToStage(i)
+makeActionBtn(tpCard, "🔍  Rescan + Refresh Stage Buttons", C.accent2, function()
+	task.spawn(function()
+		World.scan()
+		rebuildStageButtons(tpCard)
 	end)
-end
+end)
+makeActionBtn(tpCard, "🏠  TP HUB (PersistentSpawn)", C.cardInner, World.tpHub)
+makeActionBtn(tpCard, "🏁  TP Last Stage", C.accent, function()
+	World.tpStage("Level15")
+	if not World.stages.Level15 then
+		World.tpStage("Stage15")
+	end
+end)
+makeActionBtn(tpCard, "⏭  Skip → Stage 2", C.cardInner, function()
+	World.skipStage(2)
+end)
+makeActionBtn(tpCard, "⏭  Skip → Stage 3", C.cardInner, function()
+	World.skipStage(3)
+end)
+makeActionBtn(tpCard, "📌  Request Checkpoint Stage 2", C.cardInner, function()
+	World.requestCheckpoint("Stage2")
+end)
+makeActionBtn(tpCard, "📌  Request Checkpoint Stage 3", C.cardInner, function()
+	World.requestCheckpoint("Stage3")
+end)
 
-for _, stageName in ipairs({ "Stage4", "Stage5", "Stage6", "Stage7", "Stage8", "Stage9", "Stage10" }) do
-	local b = Instance.new("TextButton")
-	b.BackgroundColor3 = C.cardInner
-	b.Text = stageName
-	b.Font = Enum.Font.GothamBold
-	b.TextSize = 10
-	b.TextColor3 = C.text
-	b.AutoButtonColor = true
-	b.Parent = stageGrid
-	corner(b, 6)
-	b.MouseButton1Click:Connect(function()
-		local pos = findStagePos(stageName)
-		if pos then
-			tpTo(pos)
-			log("TP → " .. stageName)
-		else
-			setStatus("Stage not found: " .. stageName, C.red)
-		end
-	end)
-end
+local spyCard = sectionCard(pages.spy, "Remote Spy", "🕵")
+makeActionBtn(spyCard, "Install Remote Spy Hook", C.accent, installRemoteSpy)
+UI.spyFrame = Instance.new("Frame")
+UI.spyFrame.Size = UDim2.new(1, 0, 0, 220)
+UI.spyFrame.BackgroundColor3 = Color3.fromRGB(8, 5, 14)
+UI.spyFrame.BorderSizePixel = 0
+UI.spyFrame.Parent = spyCard
+corner(UI.spyFrame, 6)
+local spyLayout = Instance.new("UIListLayout")
+spyLayout.Padding = UDim.new(0, 2)
+spyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+spyLayout.Parent = UI.spyFrame
 
--- Show default page
 for name, page in pages do
 	page.Visible = name == "main"
 end
 navItems.main.BackgroundColor3 = C.accent
 navItems.main.TextColor3 = Color3.fromRGB(20, 10, 30)
 
--- Header buttons
 local minimized = false
 hdrBtn("−", C.yellow, -58, function()
 	minimized = not minimized
@@ -6193,7 +6489,6 @@ hdrBtn("×", C.red, -30, function()
 	gui:Destroy()
 end)
 
--- Drag
 local dragging, dragStart, startPos = false, nil, nil
 header.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -6226,6 +6521,13 @@ UserInputService.InputBegan:Connect(function(input, processed)
 end)
 
 task.spawn(function()
+	installRemoteSpy()
+	hookSpeedRemote()
+	World.scan()
+	rebuildStageButtons(tpCard)
+end)
+
+task.spawn(function()
 	while S.running and gui.Parent do
 		local s = readStats()
 		if UI.speedStat then UI.speedStat.Text = "Speed: " .. s.speed end
@@ -6241,8 +6543,8 @@ task.spawn(function()
 end)
 
 log("Loaded " .. CANDY_VERSION)
-log("Use tabs: Main · Move · Auto · TP")
-setStatus("Ready — pick a tab")
+log("Scanning world for real TP targets...")
+setStatus("Scanning world...")
 ]=],
 }
 
