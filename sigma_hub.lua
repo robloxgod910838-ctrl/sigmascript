@@ -1910,6 +1910,11 @@ local Trade = {
 	NET_THRESHOLD = 1.0,
 	NEUTRAL_BAND = 1.0,
 	LATEST_BOOST = 3.0,
+	ENDGAME_ELAPSED = 50,
+	ENDGAME_LINE_T = 52,
+	ENDGAME_COOLDOWN = 0.45,
+	FORCE_SELL_DROP = 0.04,
+	FORCE_SELL_PEAK_DROP = 0.06,
 }
 
 local function resetTradeSessionState()
@@ -2122,6 +2127,69 @@ local function countConsecutiveMoves(prices)
 	return rises, falls
 end
 
+local function isTradeLineActive(ui)
+	return ui._LineConn ~= nil and ui._LastLineValue ~= nil
+end
+
+local function getTradeTiming(ui)
+	if not ui._LineStartTime then
+		return nil, nil
+	end
+	local elapsed = time() - ui._LineStartTime
+	local lineT = elapsed
+	if ui._Line then
+		local ok, last = pcall(function()
+			return ui._Line:GetLast().T
+		end)
+		if ok and last then
+			lineT = last
+		end
+	end
+	return elapsed, lineT
+end
+
+local function isAtMaxEarnings(ui)
+	if not (ui._MaxValue and M.Huge and M.Huge.toHuge) then
+		return false
+	end
+	local ok, net = pcall(function()
+		return ui:GetCurrentNetValue()
+	end)
+	if not ok or not net then
+		return false
+	end
+	local ok2, capped = pcall(function()
+		return M.Huge.toHuge(ui._MaxValue) <= net
+	end)
+	return ok2 and capped
+end
+
+local function shouldForceEndgameSell(ui, price, px)
+	if not isHoldingCrypto(ui) then
+		return false, nil
+	end
+	if isAtMaxEarnings(ui) then
+		return true, "max earnings reached"
+	end
+	local elapsed, lineT = getTradeTiming(ui)
+	if elapsed and (elapsed >= Trade.ENDGAME_ELAPSED or (lineT and lineT >= Trade.ENDGAME_LINE_T)) then
+		return true, "session ending"
+	end
+	if price <= 0.05 then
+		return true, "price near zero"
+	end
+	if px.sharpCrash or px.recentDropPct >= Trade.FORCE_SELL_DROP then
+		return true, string.format("price drop %.0f%%", px.recentDropPct * 100)
+	end
+	if px.dropFromPositionPeak >= Trade.FORCE_SELL_PEAK_DROP then
+		return true, string.format("position peak drop %.0f%%", px.dropFromPositionPeak * 100)
+	end
+	if px.fallingHard and px.recentDropPct >= 0.025 then
+		return true, "hard fall"
+	end
+	return false, nil
+end
+
 local function getPriceContext(price)
 	local minP, maxP = math.huge, -math.huge
 	for _, v in Trade.prices do
@@ -2211,17 +2279,25 @@ local function startTradeHelper()
 		end
 
 		local price = ui._LastLineValue
-		local lineRunning = price ~= nil and price > 0
+		local lineRunning = isTradeLineActive(ui)
 		local canTrade = ui._TradeButton and ui._TradeButton.Gui.Active
 
 		if not lineRunning then
 			if Trade.sessionActive then
-				Trade.sessionActive = false
-				local now = os.clock()
-				if now - Trade.lastSessionEndLogAt >= 2 then
-					Trade.lastSessionEndLogAt = now
-					log("Trade: session ended (line stopped)")
+				if isHoldingCrypto(ui) then
+					local now = os.clock()
+					if now - Trade.lastSessionEndLogAt >= 2 then
+						Trade.lastSessionEndLogAt = now
+						log("Trade: line stopped while still IN — missed sell window")
+					end
+				else
+					local now = os.clock()
+					if now - Trade.lastSessionEndLogAt >= 2 then
+						Trade.lastSessionEndLogAt = now
+						log("Trade: session ended (line stopped)")
+					end
 				end
+				Trade.sessionActive = false
 			end
 			return
 		end
@@ -2258,7 +2334,15 @@ local function startTradeHelper()
 		Trade.lastPrice = price
 		Trade.rises, Trade.falls = countConsecutiveMoves(Trade.prices)
 
-		if not canTrade then
+		local news = analyzeNewsSentiment(ui)
+		local px = getPriceContext(price)
+		local elapsed, lineT = getTradeTiming(ui)
+		local sessionEnding = (elapsed and elapsed >= Trade.ENDGAME_ELAPSED)
+			or (lineT and lineT >= Trade.ENDGAME_LINE_T)
+		local forceSell, forceReason = shouldForceEndgameSell(ui, price, px)
+		local cooldown = (forceSell or sessionEnding) and Trade.ENDGAME_COOLDOWN or Trade.COOLDOWN
+
+		if not canTrade and not forceSell then
 			if now - Trade.lastWaitLogAt >= Trade.WAIT_LOG then
 				Trade.lastWaitLogAt = now
 				log(string.format(
@@ -2271,19 +2355,18 @@ local function startTradeHelper()
 			return
 		end
 
-		local cooldown = Trade.COOLDOWN
 		if now - Trade.lastAt < cooldown then
 			return
 		end
 
-		local news = analyzeNewsSentiment(ui)
-		local px = getPriceContext(price)
 		local shouldTrade = false
 		local reason = nil
-		local net = news.netScore
 		local latestLabel = news.latestHeader or "no headline"
 
-		if holdingCrypto then
+		if forceSell then
+			shouldTrade = true
+			reason = "endgame — " .. forceReason
+		elseif holdingCrypto then
 			if news.latestUrgentBear or (news.latestBearish and news.redBreaking) then
 				shouldTrade = true
 				reason = string.format("urgent bear headline [%s]", latestLabel)
@@ -2305,7 +2388,9 @@ local function startTradeHelper()
 				and now - Trade.lastSellAt < Trade.POST_SELL_BUY_WAIT
 				and not (news.latestBullish and news.bullScore > news.bearScore + Trade.NET_THRESHOLD)
 
-			if postSellBlock then
+			if sessionEnding then
+				shouldTrade = false
+			elseif postSellBlock then
 				shouldTrade = false
 			elseif news.latestBearish or news.latestUrgentBear then
 				shouldTrade = false
