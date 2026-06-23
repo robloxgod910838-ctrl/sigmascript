@@ -28,7 +28,7 @@ local CollectionService = game:GetService("CollectionService")
 local RS = game:GetService("ReplicatedStorage")
 local plr = Players.LocalPlayer
 
-local SIGMA_VERSION = "2026.06.23-trade4"
+local SIGMA_VERSION = "2026.06.23-trade5"
 
 local LOOP_DELAY = 0.1
 local BUYS_PER_TICK = 8
@@ -2133,20 +2133,20 @@ local Trade = {
 	trough = nil,
 	sessionActive = false,
 	sessionStartAt = 0,
-	COOLDOWN = 3.25,
-	ENDGAME_COOLDOWN = 0.75,
-	POST_SELL_BUY_WAIT = 4.5,
-	POST_BUY_SELL_WAIT = 3.0,
-	WAIT_LOG = 5.0,
-	TICK_INTERVAL = 0.15,
-	NEWS_REFRESH = 0.35,
-	POSITION_LOCK = 1.0,
+	COOLDOWN = 2.25,
+	ENDGAME_COOLDOWN = 0.6,
+	POST_SELL_BUY_WAIT = 3.0,
+	POST_BUY_SELL_WAIT = 2.0,
+	WAIT_LOG = 4.0,
+	TICK_INTERVAL = 0.12,
+	NEWS_REFRESH = 0.3,
+	POSITION_LOCK = 0.85,
 	BUF = 24,
-	RISE_MIN = 4,
-	CRASH = 0.08,
+	RISE_MIN = 3,
+	CRASH = 0.07,
 	MA = 5,
-	NET_THRESHOLD = 1.25,
-	NEUTRAL_BAND = 1.25,
+	NET_THRESHOLD = 0.75,
+	NEUTRAL_BAND = 1.0,
 	LATEST_BOOST = 3.0,
 	ENDGAME_ELAPSED = 42,
 	ENDGAME_LINE_T = 48,
@@ -2467,11 +2467,17 @@ local function shouldForceEndgameSell(ui, price, px, sessionEnding, sessionCriti
 	if sessionCritical then
 		return true, "critical — must exit position"
 	end
+	if sessionEnding then
+		return true, "session ending — take profits"
+	end
 	if isAtMaxEarnings(ui) then
 		return true, "max earnings reached"
 	end
 	if price <= 0.05 then
 		return true, "price near zero"
+	end
+	if px.dropFromPositionPeak >= Trade.FORCE_SELL_PEAK_DROP then
+		return true, string.format("position peak drop %.0f%%", px.dropFromPositionPeak * 100)
 	end
 	return false, nil
 end
@@ -2490,10 +2496,7 @@ local function decideSellAction(news, px, forceSell, forceReason, sessionCritica
 		return false, nil
 	end
 
-	if news.latestBullish and not sessionCritical and not sessionEnding then
-		return false, nil
-	end
-
+	-- Primary: bearish news
 	if news.latestUrgentBear or (news.latestBearish and news.redBreaking) then
 		return true, "urgent bear headline"
 	end
@@ -2504,27 +2507,36 @@ local function decideSellAction(news, px, forceSell, forceReason, sessionCritica
 		return true, "net bearish news"
 	end
 
-	if sessionEnding or sessionCritical then
-		if news.majorityBearish or news.latestBearish then
-			return true, "endgame + bearish news"
-		end
-		if px.recentDropPct >= Trade.FORCE_SELL_DROP and news.bearScore >= news.bullScore then
-			return true, string.format("endgame + drop %.0f%%", px.recentDropPct * 100)
-		end
-		if px.dropFromPositionPeak >= Trade.FORCE_SELL_PEAK_DROP then
-			return true, string.format("endgame + peak drop %.0f%%", px.dropFromPositionPeak * 100)
-		end
-		if sessionCritical then
-			return true, "critical exit"
-		end
+	-- Hold winners while headline is green and price still climbing
+	if news.latestBullish and px.risingHard and not px.atLocalPeak and not sessionEnding then
 		return false, nil
 	end
 
-	if px.sharpCrash and news.latestBearish then
-		return true, "crash + bearish headline"
+	-- Price exits when news is not strongly bullish
+	local strongBull = news.latestBullish and news.bullScore > news.bearScore + 1.5
+	if px.atLocalPeak and not strongBull then
+		return true, "local peak — take profit"
 	end
-	if px.sharpCrash and news.bearScore > news.bullScore + Trade.NET_THRESHOLD then
-		return true, "crash + net bearish"
+	if px.fallingHard and px.recentDropPct >= 0.03 and not strongBull then
+		return true, string.format("falling %.0f%%", px.recentDropPct * 100)
+	end
+	if px.dropFromPositionPeak >= 0.045 and not strongBull then
+		return true, string.format("peak giveback %.0f%%", px.dropFromPositionPeak * 100)
+	end
+	if px.sharpCrash and news.bearScore >= news.bullScore then
+		return true, "sharp crash"
+	end
+
+	-- Neutral news tiebreaker: exit on clear downturn
+	if news.newsNeutral and px.fallingHard and px.recentDropPct >= 0.025 then
+		return true, "neutral news — price falling"
+	end
+
+	if news.newsCount == 0 and px.atLocalPeak then
+		return true, "peak (no headlines)"
+	end
+	if news.newsCount == 0 and px.fallingHard and px.recentDropPct >= 0.035 then
+		return true, "falling (no headlines)"
 	end
 
 	return false, nil
@@ -2537,18 +2549,39 @@ local function decideBuyAction(news, px, now, sessionEnding, sessionCritical)
 	if Trade.lastSellAt > 0 and now - Trade.lastSellAt < Trade.POST_SELL_BUY_WAIT then
 		return false, nil
 	end
-	if news.latestBearish or news.latestUrgentBear or news.majorityBearish then
+	if news.latestBearish or news.latestUrgentBear then
 		return false, nil
 	end
-	if px.atLocalPeak then
+	if news.majorityBearish and not news.latestBullish then
 		return false, nil
 	end
-	if news.latestBullish and news.bullScore > news.bearScore + Trade.NET_THRESHOLD then
-		return true, "bullish news + green latest"
+	if px.atLocalPeak and not news.latestBullish then
+		return false, nil
 	end
-	if news.latestBullish and news.greenBreaking and news.bullScore >= news.bearScore then
+
+	-- Primary: bullish news
+	if news.latestBullish and news.bullScore >= news.bearScore then
+		return true, "green latest headline"
+	end
+	if news.greenBreaking and news.bullScore >= news.bearScore then
 		return true, "green breaking headline"
 	end
+	if news.bullScore > news.bearScore + Trade.NET_THRESHOLD and news.latestBullish then
+		return true, "net bullish + green latest"
+	end
+
+	-- Neutral news: buy dips on confirmed rise only
+	if news.newsNeutral and px.risingHard and px.belowMA and px.momentum > 0 then
+		return true, "neutral news — rise from dip"
+	end
+	if news.newsNeutral and px.atLocalBottom and px.momentum > 0 and px.rises >= 2 then
+		return true, "neutral news — local bottom"
+	end
+
+	if news.newsCount == 0 and px.atLocalBottom and px.risingHard then
+		return true, "bottom bounce (no headlines)"
+	end
+
 	return false, nil
 end
 
@@ -2753,7 +2786,7 @@ local function startTradeHelper()
 		local px = getPriceContext(price)
 		local forceSell, forceReason = shouldForceEndgameSell(ui, price, px, sessionEnding, sessionCritical)
 		local cooldown = Trade.COOLDOWN
-		if sessionCritical and holdingCrypto then
+		if holdingCrypto and (sessionCritical or sessionEnding or forceSell) then
 			cooldown = Trade.ENDGAME_COOLDOWN
 		end
 
