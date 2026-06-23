@@ -1,5 +1,5 @@
 -- Sigma Scripts — multi-game hub launcher (bundled, keyless)
-local HUB_VERSION = "2026.06.23c"
+local HUB_VERSION = "2026.06.23d"
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -5021,7 +5021,7 @@ local Workspace = game:GetService("Workspace")
 local RS = game:GetService("ReplicatedStorage")
 
 local plr = Players.LocalPlayer
-local SIGMA_VERSION = "2026.06.23-anime3"
+local SIGMA_VERSION = "2026.06.23-anime4"
 
 local BUY_DELAY = 0.6
 local PLACE_DELAY = 1
@@ -5066,6 +5066,7 @@ local State = {
 	skipRollAnim = false,
 	tpToRoll = true,
 	running = true,
+	automationBusy = false,
 	lastAction = "Idle",
 	logLines = {},
 	lastRollAt = 0,
@@ -5166,6 +5167,17 @@ local function getHRP()
 	return char:FindFirstChild("HumanoidRootPart")
 end
 
+local function nearPart(part, maxDist)
+	if not part or not part:IsA("BasePart") then
+		return false
+	end
+	local hrp = getHRP()
+	if not hrp then
+		return false
+	end
+	return (hrp.Position - part.Position).Magnitude <= (maxDist or 10)
+end
+
 local function tpNear(part, offsetY)
 	if not part or not part:IsA("BasePart") then
 		return false
@@ -5192,14 +5204,18 @@ local function firePrompt(prompt, hold)
 	return ok
 end
 
-local function usePrompt(prompt)
+local function usePrompt(prompt, opts)
 	if not prompt then
 		return false
 	end
+	opts = opts or {}
 	local part = prompt.Parent
-	if part and part:IsA("BasePart") then
-		tpNear(part, 2)
-		task.wait(0.08)
+	if not opts.skipTp and part and part:IsA("BasePart") then
+		local range = prompt.MaxActivationDistance or 8
+		if not nearPart(part, range + 1) then
+			tpNear(part, 2)
+			task.wait(0.08)
+		end
 	end
 	return firePrompt(prompt)
 end
@@ -5244,8 +5260,11 @@ local function rollOnce()
 	local rollPrompt = findPrompt(base, "RollPrompt")
 	if rollPrompt then
 		if State.tpToRoll then
-			tpNear(rollPrompt.Parent, 2)
-			task.wait(0.05)
+			local rollPart = rollPrompt.Parent
+			if rollPart and rollPart:IsA("BasePart") and not nearPart(rollPart, rollPrompt.MaxActivationDistance or 10) then
+				tpNear(rollPart, 2)
+				task.wait(0.05)
+			end
 		end
 		ok = firePrompt(rollPrompt, rollPrompt.HoldDuration) or ok
 	end
@@ -5255,7 +5274,7 @@ local function rollOnce()
 		if rollFolder then
 			if State.tpToRoll then
 				local btn = rollFolder:FindFirstChild("RollButton", true)
-				if btn and btn:IsA("BasePart") then
+				if btn and btn:IsA("BasePart") and not nearPart(btn, 10) then
 					tpNear(btn, 2)
 					task.wait(0.05)
 				end
@@ -5304,7 +5323,7 @@ local function buyCharacter(entry)
 	if not entry or not entry.prompt then
 		return false
 	end
-	local ok = usePrompt(entry.prompt)
+	local ok = usePrompt(entry.prompt, { skipTp = nearPart(entry.prompt.Parent, (entry.prompt.MaxActivationDistance or 8) + 1) })
 	if ok then
 		log("Buy: " .. entry.model.Name)
 	end
@@ -5592,9 +5611,23 @@ local function onHeartbeat()
 		return
 	end
 	State.tick += 1
+
+	if State.tick % 15 == 0 then
+		local s = readStats()
+		if UI.vCash then UI.vCash.Text = s.cash end
+		if UI.vRolls then UI.vRolls.Text = s.rolls end
+		if UI.vGrid then UI.vGrid.Text = s.grid end
+		if UI.vWave then UI.vWave.Text = s.wave end
+		if UI.vUnits then UI.vUnits.Text = s.shop .. " shop / " .. s.tools .. " tools" end
+		if UI.vBase then UI.vBase.Text = s.base end
+	end
+end
+
+local function runAutomation()
 	local now = os.clock()
 
 	if State.autoRoll and now - State.lastRollAt >= getRollDelay() then
+		State.lastRollAt = now
 		rollOnce()
 	end
 	if State.autoBuy then
@@ -5615,16 +5648,22 @@ local function onHeartbeat()
 	if State.autoSell and now - State.lastSellAt >= 6 then
 		trySellDuplicates()
 	end
+end
 
-	if State.tick % 30 == 0 then
-		local s = readStats()
-		if UI.vCash then UI.vCash.Text = s.cash end
-		if UI.vRolls then UI.vRolls.Text = s.rolls end
-		if UI.vGrid then UI.vGrid.Text = s.grid end
-		if UI.vWave then UI.vWave.Text = s.wave end
-		if UI.vUnits then UI.vUnits.Text = s.shop .. " shop / " .. s.tools .. " tools" end
-		if UI.vBase then UI.vBase.Text = s.base end
-	end
+local function startAutomationLoop()
+	task.spawn(function()
+		while State.running do
+			if not State.automationBusy then
+				State.automationBusy = true
+				local ok, err = pcall(runAutomation)
+				if not ok then
+					log("Auto error: " .. tostring(err))
+				end
+				State.automationBusy = false
+			end
+			task.wait(0.35)
+		end
+	end)
 end
 
 -- UI (compact)
@@ -5689,6 +5728,7 @@ local function buildUI()
 	header.Size = UDim2.new(1, 0, 0, 44)
 	header.BackgroundColor3 = C.panel
 	header.BorderSizePixel = 0
+	header.Active = true
 	header.Parent = root
 	corner(header, 14)
 
@@ -5771,7 +5811,7 @@ local function buildUI()
 	UI.footerStatus.TextSize = 10
 	UI.footerStatus.TextXAlignment = Enum.TextXAlignment.Left
 	UI.footerStatus.TextColor3 = C.muted
-	UI.footerStatus.Text = "Active"
+	UI.footerStatus.Text = "Drag header · Right Ctrl hide"
 	UI.footerStatus.Parent = UI.body
 
 	local pages = {}
@@ -6020,6 +6060,33 @@ local function buildUI()
 
 	selectNav("Home")
 
+	local dragging = false
+	local dragStart
+	local startPos
+	header.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = root.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			root.Position = UDim2.new(
+				startPos.X.Scale,
+				startPos.X.Offset + delta.X,
+				startPos.Y.Scale,
+				startPos.Y.Offset + delta.Y
+			)
+		end
+	end)
+
 	UserInputService.InputBegan:Connect(function(input, processed)
 		if processed then return end
 		if input.KeyCode == Enum.KeyCode.RightControl then
@@ -6043,8 +6110,9 @@ local function buildUI()
 end
 
 buildUI()
+startAutomationLoop()
 
-heartbeatConn = RunService.Heartbeat:Connect(function()
+heartbeatConn = RunService.Heartbeat:Connect(function())
 	UI.frames += 1
 	onHeartbeat()
 end)
