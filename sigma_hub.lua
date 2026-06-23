@@ -23,6 +23,7 @@ local EMBEDDED = {
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
 local CollectionService = game:GetService("CollectionService")
 local RS = game:GetService("ReplicatedStorage")
 local plr = Players.LocalPlayer
@@ -34,6 +35,8 @@ local FRUIT_TRAVEL_DWELL = 0.25
 local FRUIT_MAX_COLLECT_ATTEMPTS = 20
 local FRUIT_EMPTY_CYCLE_DELAY = 0.75
 local CASH_TRAVEL_DWELL = 0.6
+local REBIRTH_KICKSTART_TIMEOUT = 45
+local REBIRTH_KICKSTART_WAKE_INTERVAL = 0.12
 
 local MODULE_PATHS = {
 	{ "Huge", RS.Modules.Huge },
@@ -106,6 +109,11 @@ local Farm = {
 	scannedTreeCount = 0,
 	lastRebirthAttemptAt = 0,
 	lastRebirthNoTycoonLogAt = 0,
+	lastKnownRebirths = nil,
+	rebirthKickstart = false,
+	rebirthKickstartStartedAt = 0,
+	lastRebirthKickstartWakeAt = 0,
+	lastRebirthKickstartLogAt = 0,
 	lastUpgradeLogAt = 0,
 	phoneConns = {},
 }
@@ -1318,6 +1326,158 @@ local function formatMultiplier(n)
 	return tostring(n)
 end
 
+local function getFirstEnabledEarner(t)
+	local a = comp(t, "Analyzer")
+	if not a then
+		return nil
+	end
+	if M.Balance and M.Balance.PurchaseOrder then
+		for _, key in M.Balance.PurchaseOrder do
+			local earner = a.GetEarner and a:GetEarner(key)
+			if earner and earner.IsEnabled and earner:IsEnabled() then
+				return earner
+			end
+		end
+	end
+	for _, earner in a:GetEarners() do
+		if earner.IsEnabled and earner:IsEnabled() then
+			return earner
+		end
+	end
+	return nil
+end
+
+local function wakeEarner(earner)
+	if not earner then
+		return false
+	end
+	local ok = pcall(function()
+		if earner.WakeAsync then
+			earner:WakeAsync()
+			return
+		end
+		local income = earner.Tycoon and comp(earner.Tycoon, "ClientIncome")
+		if income and income.WakeManualStreamAsync and earner.Name then
+			income:WakeManualStreamAsync(earner.Name)
+		end
+	end)
+	return ok
+end
+
+local function getNextPurchaseNeed(t)
+	local a = comp(t, "Analyzer")
+	if not (a and M.Balance) then
+		return nil
+	end
+	local purchases = a:GetPurchases()
+	for _, key in M.Balance.PurchaseOrder do
+		local purchase = purchases[key]
+		if purchase and purchase.IsEnabled and purchase:IsEnabled() and not purchase:IsPurchased() then
+			local price
+			pcall(function()
+				price = purchase:GetPrice()
+			end)
+			return price, purchase
+		end
+	end
+	return nil
+end
+
+local function markRebirthKickstart(rebirthCount)
+	Farm.rebirthKickstart = true
+	Farm.rebirthKickstartStartedAt = os.clock()
+	Farm.lastRebirthKickstartWakeAt = 0
+	if rebirthCount ~= nil then
+		Farm.lastKnownRebirths = rebirthCount
+	end
+	log("Rebirth: waking first earner for auto-buy")
+	setStatus("Post-rebirth: waking earner")
+end
+
+local function detectRebirthIncrease()
+	if not Farm.autoComplete then
+		return
+	end
+	local t = getTycoon()
+	if not t then
+		return
+	end
+	local tr = comp(t, "Rebirth")
+	if not tr then
+		return
+	end
+	local ok, count = pcall(function()
+		return tr:GetRebirths()
+	end)
+	if not ok or count == nil then
+		return
+	end
+	if Farm.lastKnownRebirths == nil then
+		Farm.lastKnownRebirths = count
+		return
+	end
+	if count > Farm.lastKnownRebirths then
+		Farm.lastKnownRebirths = count
+		markRebirthKickstart(count)
+	end
+end
+
+local function tryRebirthKickstart()
+	detectRebirthIncrease()
+	if not Farm.rebirthKickstart then
+		return false
+	end
+
+	local now = os.clock()
+	if now - Farm.rebirthKickstartStartedAt > REBIRTH_KICKSTART_TIMEOUT then
+		Farm.rebirthKickstart = false
+		log("Rebirth kickstart timed out")
+		return false
+	end
+
+	local t = getTycoon()
+	if not t then
+		return true
+	end
+
+	tryAutoBuy(1)
+
+	local cb = comp(t, "ClientBalances")
+	local nextPrice = getNextPurchaseNeed(t)
+	if cb and nextPrice and M.Huge and M.Huge.one then
+		local needsCash = M.Huge.one <= nextPrice
+		if needsCash then
+			local cashOk, cash = pcall(function()
+				return cb:GetCash()
+			end)
+			if cashOk and cash and cash >= nextPrice then
+				Farm.rebirthKickstart = false
+				log("Rebirth kickstart done — ready for auto-buy")
+				return false
+			end
+		end
+	elseif cb and not nextPrice then
+		Farm.rebirthKickstart = false
+		return false
+	end
+
+	if now - Farm.lastRebirthKickstartWakeAt >= REBIRTH_KICKSTART_WAKE_INTERVAL then
+		Farm.lastRebirthKickstartWakeAt = now
+		local earner = getFirstEnabledEarner(t)
+		if earner then
+			wakeEarner(earner)
+			if now - Farm.lastRebirthKickstartLogAt >= 2 then
+				Farm.lastRebirthKickstartLogAt = now
+				local label = earner.DisplayName or earner.Name or "earner"
+				setStatus("Post-rebirth: waking " .. label)
+				log("Rebirth kickstart: waking " .. label)
+			end
+		end
+	end
+
+	return true
+end
+
 local function getRebirthMultiplier()
 	local fromBox = UI.rebirthMultBox and tonumber(UI.rebirthMultBox.Text)
 	if fromBox and fromBox >= 1 and fromBox <= 100 then
@@ -1462,6 +1622,15 @@ local function tryAutoRebirth()
 	if result then
 		log("Rebirth success (+" .. fmt(result) .. " investors)")
 		setStatus("Rebirth!")
+		if Farm.autoComplete then
+			local afterCount
+			if tr then
+				pcall(function()
+					afterCount = tr:GetRebirths()
+				end)
+			end
+			markRebirthKickstart(afterCount)
+		end
 		return
 	end
 
@@ -1474,15 +1643,24 @@ local function tryAutoRebirth()
 	if beforeRebirths and afterRebirths and afterRebirths > beforeRebirths then
 		log("Rebirth success (count " .. tostring(afterRebirths) .. ")")
 		setStatus("Rebirth!")
+		if Farm.autoComplete then
+			markRebirthKickstart(afterRebirths)
+		end
 	else
 		log("Rebirth declined by server (returned " .. tostring(result) .. ")")
 	end
 end
 
 local function tryAutoComplete()
+	local kickstarting = tryRebirthKickstart()
 	local bought = tryAutoBuy(BUYS_PER_TICK)
 	if bought > 0 then
+		if Farm.rebirthKickstart then
+			Farm.rebirthKickstart = false
+		end
 		setStatus("Auto-buy: " .. bought .. " items")
+	elseif kickstarting then
+		setStatus("Post-rebirth: waking first earner...")
 	else
 		setStatus("Auto-buy: waiting for cash...")
 	end
@@ -2439,6 +2617,184 @@ local function setFeature(key, enabled)
 	refreshAllToggles()
 end
 
+local CONFIG = {
+	folder = "SigmaScripts/SellLemons",
+	activeFile = "SigmaScripts/SellLemons/_active.txt",
+	version = 1,
+	activeName = nil,
+}
+
+local FEATURE_CONFIG_KEYS = {
+	"autoComplete",
+	"autoFruit",
+	"autoUpgrade",
+	"autoCashDrop",
+	"autoRebirth",
+	"autoPhone",
+	"autoTrade",
+	"autoRace",
+}
+
+local function configStorageReady()
+	return writefile ~= nil and readfile ~= nil and isfile ~= nil
+end
+
+local function ensureConfigFolder()
+	if not configStorageReady() then
+		return false
+	end
+	if makefolder and isfolder then
+		if not isfolder(CONFIG.folder) then
+			local ok = pcall(makefolder, CONFIG.folder)
+			if not ok then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+local function sanitizeConfigName(raw)
+	if type(raw) ~= "string" then
+		return ""
+	end
+	local name = string.gsub(raw, "^%s*(.-)%s*$", "%1")
+	name = string.gsub(name, "[^%w%-_]", "")
+	if #name > 32 then
+		name = string.sub(name, 1, 32)
+	end
+	return name
+end
+
+local function configFilePath(name)
+	return CONFIG.folder .. "/" .. name .. ".json"
+end
+
+local function captureConfigData()
+	local features = {}
+	for _, key in ipairs(FEATURE_CONFIG_KEYS) do
+		features[key] = Farm[key] == true
+	end
+	return {
+		version = CONFIG.version,
+		rebirthMultiplier = Farm.rebirthMultiplier,
+		upgradeMultiplier = Farm.upgradeMultiplier,
+		features = features,
+	}
+end
+
+local function listConfigNames()
+	local names = {}
+	if not configStorageReady() then
+		return names
+	end
+	ensureConfigFolder()
+	if listfiles then
+		local ok, files = pcall(listfiles, CONFIG.folder)
+		if ok and type(files) == "table" then
+			for _, path in ipairs(files) do
+				local base = path:match("([^/\\]+)$") or path
+				local name = base:match("^(.+)%.json$")
+				if name and name ~= "_active" then
+					table.insert(names, name)
+				end
+			end
+		end
+	end
+	table.sort(names, function(a, b)
+		return a:lower() < b:lower()
+	end)
+	return names
+end
+
+local function getActiveConfigName()
+	if CONFIG.activeName and CONFIG.activeName ~= "" then
+		return CONFIG.activeName
+	end
+	if readfile and isfile and isfile(CONFIG.activeFile) then
+		local ok, txt = pcall(readfile, CONFIG.activeFile)
+		if ok and type(txt) == "string" and #txt > 0 then
+			CONFIG.activeName = sanitizeConfigName(txt)
+			return CONFIG.activeName ~= "" and CONFIG.activeName or nil
+		end
+	end
+	return nil
+end
+
+local function saveConfigNamed(name)
+	name = sanitizeConfigName(name)
+	if name == "" then
+		return false, "Enter a config name"
+	end
+	if not ensureConfigFolder() then
+		return false, "Executor needs writefile/readfile"
+	end
+	local data = captureConfigData()
+	local okJson, json = pcall(HttpService.JSONEncode, HttpService, data)
+	if not okJson or type(json) ~= "string" then
+		return false, "Could not encode config"
+	end
+	local okW = pcall(writefile, configFilePath(name), json)
+	if not okW then
+		return false, "Save failed"
+	end
+	pcall(writefile, CONFIG.activeFile, name)
+	CONFIG.activeName = name
+	return true, name
+end
+
+local function loadConfigNamed(name, applyFn)
+	name = sanitizeConfigName(name)
+	if name == "" then
+		return false, "Enter a config name"
+	end
+	if not configStorageReady() then
+		return false, "Executor needs writefile/readfile"
+	end
+	local path = configFilePath(name)
+	if not isfile(path) then
+		return false, "Config not found"
+	end
+	local okR, raw = pcall(readfile, path)
+	if not okR or type(raw) ~= "string" or #raw == 0 then
+		return false, "Could not read config"
+	end
+	local okD, data = pcall(HttpService.JSONDecode, HttpService, raw)
+	if not okD or type(data) ~= "table" then
+		return false, "Invalid config file"
+	end
+	if applyFn then
+		applyFn(data)
+	end
+	pcall(writefile, CONFIG.activeFile, name)
+	CONFIG.activeName = name
+	return true, name
+end
+
+local function deleteConfigNamed(name)
+	name = sanitizeConfigName(name)
+	if name == "" then
+		return false, "Enter a config name"
+	end
+	if not isfile(configFilePath(name)) then
+		return false, "Config not found"
+	end
+	if not delfile then
+		return false, "Executor needs delfile"
+	end
+	local ok = pcall(delfile, configFilePath(name))
+	if not ok then
+		return false, "Delete failed"
+	end
+	if getActiveConfigName() == name then
+		CONFIG.activeName = nil
+		if isfile(CONFIG.activeFile) then
+			pcall(delfile, CONFIG.activeFile)
+		end
+	end
+	return true, name
+end
+
 local function buildUI()
 local C = {
 	bg = Color3.fromRGB(13, 15, 20),
@@ -3296,6 +3652,29 @@ end)
 
 makeToggle(farmInner, "Auto Phone Offers", "Raises once then accepts", "autoPhone", "📱")
 
+local function applyConfigData(data)
+	if type(data) ~= "table" then
+		return false
+	end
+	local rm = tonumber(data.rebirthMultiplier)
+	if rm and rm >= 1 and rm <= 100 then
+		applyRebirthMultiplier(tostring(rm))
+	end
+	local um = tonumber(data.upgradeMultiplier)
+	if um and um >= 1 and um <= 100 then
+		applyUpgradeMultiplier(tostring(um))
+	end
+	local features = type(data.features) == "table" and data.features or {}
+	for _, key in ipairs(FEATURE_CONFIG_KEYS) do
+		local enabled = features[key] == true
+		if Farm[key] ~= enabled then
+			setFeature(key, enabled)
+		end
+	end
+	refreshAllToggles()
+	return true
+end
+
 local farmActions = Instance.new("Frame")
 farmActions.Size = UDim2.new(1, 0, 0, 36)
 farmActions.BackgroundTransparency = 1
@@ -3351,6 +3730,220 @@ local miniInner = sectionCard(miniPage, "Quick Actions", "🎯")
 makeToggle(miniInner, "Auto Lemon Trading", "Plays trade minigame", "autoTrade", "📈")
 makeToggle(miniInner, "Auto Lemon Dash", "Plays race minigame", "autoRace", "🏁")
 
+local configInner = sectionCard(infoPage, "Configs", "💾")
+
+local configCurrent = Instance.new("TextLabel")
+configCurrent.BackgroundTransparency = 1
+configCurrent.Size = UDim2.new(1, 0, 0, 18)
+configCurrent.Font = Enum.Font.GothamBold
+configCurrent.TextSize = 12
+configCurrent.TextXAlignment = Enum.TextXAlignment.Left
+configCurrent.TextColor3 = C.muted
+configCurrent.Text = "Active config: (none)"
+configCurrent.Parent = configInner
+UI.configCurrentLabel = configCurrent
+
+local function refreshConfigCurrentLabel()
+	local active = getActiveConfigName()
+	if active then
+		configCurrent.Text = "Active config: " .. active
+		configCurrent.TextColor3 = C.accent
+	else
+		configCurrent.Text = "Active config: (none)"
+		configCurrent.TextColor3 = C.muted
+	end
+end
+
+if not configStorageReady() then
+	local storageWarn = Instance.new("TextLabel")
+	storageWarn.BackgroundTransparency = 1
+	storageWarn.Size = UDim2.new(1, 0, 0, 32)
+	storageWarn.Font = Enum.Font.Gotham
+	storageWarn.TextSize = 11
+	storageWarn.TextXAlignment = Enum.TextXAlignment.Left
+	storageWarn.TextYAlignment = Enum.TextYAlignment.Top
+	storageWarn.TextWrapped = true
+	storageWarn.TextColor3 = C.yellow
+	storageWarn.Text = "Config files need writefile, readfile, and isfile on your executor."
+	storageWarn.Parent = configInner
+end
+
+local configNameRow = Instance.new("Frame")
+configNameRow.Size = UDim2.new(1, 0, 0, 34)
+configNameRow.BackgroundTransparency = 1
+configNameRow.Parent = configInner
+
+local configNameWrap = Instance.new("Frame")
+configNameWrap.Size = UDim2.new(1, -200, 1, 0)
+configNameWrap.BackgroundColor3 = C.cardInner
+configNameWrap.BorderSizePixel = 0
+configNameWrap.Parent = configNameRow
+corner(configNameWrap, 8)
+stroke(configNameWrap, C.border, 1, 0.55)
+
+UI.configNameBox = Instance.new("TextBox")
+UI.configNameBox.BackgroundTransparency = 1
+UI.configNameBox.Size = UDim2.new(1, -16, 1, 0)
+UI.configNameBox.Position = UDim2.fromOffset(10, 0)
+UI.configNameBox.Font = Enum.Font.Gotham
+UI.configNameBox.TextSize = 13
+UI.configNameBox.PlaceholderText = "Config name..."
+UI.configNameBox.PlaceholderColor3 = C.muted
+UI.configNameBox.TextColor3 = C.text
+UI.configNameBox.ClearTextOnFocus = false
+UI.configNameBox.Text = ""
+UI.configNameBox.Parent = configNameWrap
+
+local function configActionBtn(text, color, xOff, callback)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.fromOffset(56, 34)
+	b.Position = UDim2.new(1, xOff, 0, 0)
+	b.BackgroundColor3 = color
+	b.Text = text
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 11
+	b.TextColor3 = C.text
+	b.AutoButtonColor = true
+	b.Parent = configNameRow
+	corner(b, 8)
+	stroke(b, C.border, 1, 0.4)
+	b.MouseButton1Click:Connect(callback)
+	return b
+end
+
+local configStatus = Instance.new("TextLabel")
+configStatus.BackgroundTransparency = 1
+configStatus.Size = UDim2.new(1, 0, 0, 16)
+configStatus.Font = Enum.Font.Gotham
+configStatus.TextSize = 10
+configStatus.TextXAlignment = Enum.TextXAlignment.Left
+configStatus.TextColor3 = C.muted
+configStatus.Text = ""
+configStatus.Parent = configInner
+
+local configList = Instance.new("ScrollingFrame")
+configList.Size = UDim2.new(1, 0, 0, 108)
+configList.BackgroundColor3 = C.cardInner
+configList.BackgroundTransparency = 0.15
+configList.BorderSizePixel = 0
+configList.ScrollBarThickness = 3
+configList.ScrollBarImageColor3 = C.accent
+configList.CanvasSize = UDim2.fromOffset(0, 0)
+configList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+configList.Parent = configInner
+corner(configList, 8)
+stroke(configList, C.border, 1, 0.6)
+
+local configListLayout = Instance.new("UIListLayout")
+configListLayout.Padding = UDim.new(0, 4)
+configListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+configListLayout.Parent = configList
+
+local configListPad = Instance.new("UIPadding")
+configListPad.PaddingTop = UDim.new(0, 6)
+configListPad.PaddingBottom = UDim.new(0, 6)
+configListPad.PaddingLeft = UDim.new(0, 6)
+configListPad.PaddingRight = UDim.new(0, 6)
+configListPad.Parent = configList
+
+local configEmpty = Instance.new("TextLabel")
+configEmpty.BackgroundTransparency = 1
+configEmpty.Size = UDim2.new(1, 0, 0, 28)
+configEmpty.Font = Enum.Font.Gotham
+configEmpty.TextSize = 11
+configEmpty.TextColor3 = C.muted
+configEmpty.Text = "No saved configs yet"
+configEmpty.Parent = configList
+
+local function refreshConfigList()
+	for _, child in configList:GetChildren() do
+		if child:IsA("TextButton") then
+			child:Destroy()
+		end
+	end
+	local names = listConfigNames()
+	configEmpty.Visible = #names == 0
+	local active = getActiveConfigName()
+	for i, name in ipairs(names) do
+		local btn = Instance.new("TextButton")
+		btn.LayoutOrder = i
+		btn.Size = UDim2.new(1, 0, 0, 28)
+		btn.BackgroundColor3 = name == active and Color3.fromRGB(24, 38, 46) or C.card
+		btn.BackgroundTransparency = name == active and 0.05 or 0.2
+		btn.Text = "  " .. name .. (name == active and "  · active" or "")
+		btn.Font = Enum.Font.GothamMedium
+		btn.TextSize = 12
+		btn.TextXAlignment = Enum.TextXAlignment.Left
+		btn.TextColor3 = name == active and C.accentBright or C.text
+		btn.AutoButtonColor = false
+		btn.Parent = configList
+		corner(btn, 6)
+		stroke(btn, name == active and C.accent or C.border, 1, name == active and 0.25 or 0.55)
+		btn.MouseButton1Click:Connect(function()
+			UI.configNameBox.Text = name
+		end)
+		btn.MouseButton2Click:Connect(function()
+			UI.configNameBox.Text = name
+			local ok, msg = loadConfigNamed(name, applyConfigData)
+			if ok then
+				configStatus.Text = "Loaded " .. name
+				configStatus.TextColor3 = C.green
+				refreshConfigCurrentLabel()
+				refreshConfigList()
+				log("Loaded config: " .. name)
+			else
+				configStatus.Text = tostring(msg)
+				configStatus.TextColor3 = C.red
+			end
+		end)
+	end
+end
+
+configActionBtn("Save", C.accentDim, -192, function()
+	local ok, msg = saveConfigNamed(UI.configNameBox.Text)
+	if ok then
+		configStatus.Text = "Saved " .. msg
+		configStatus.TextColor3 = C.green
+		refreshConfigCurrentLabel()
+		refreshConfigList()
+		log("Saved config: " .. msg)
+	else
+		configStatus.Text = tostring(msg)
+		configStatus.TextColor3 = C.red
+	end
+end)
+
+configActionBtn("Load", C.cardInner, -128, function()
+	local ok, msg = loadConfigNamed(UI.configNameBox.Text, applyConfigData)
+	if ok then
+		configStatus.Text = "Loaded " .. msg
+		configStatus.TextColor3 = C.green
+		refreshConfigCurrentLabel()
+		refreshConfigList()
+		log("Loaded config: " .. msg)
+	else
+		configStatus.Text = tostring(msg)
+		configStatus.TextColor3 = C.red
+	end
+end)
+
+configActionBtn("Delete", C.red, -60, function()
+	local ok, msg = deleteConfigNamed(UI.configNameBox.Text)
+	if ok then
+		configStatus.Text = "Deleted " .. msg
+		configStatus.TextColor3 = C.yellow
+		refreshConfigCurrentLabel()
+		refreshConfigList()
+		log("Deleted config: " .. msg)
+	else
+		configStatus.Text = tostring(msg)
+		configStatus.TextColor3 = C.red
+	end
+end)
+
+refreshConfigCurrentLabel()
+refreshConfigList()
+
 local infoInner = sectionCard(infoPage, "Activity Log", "📋")
 UI.logLabel = Instance.new("TextLabel")
 UI.logLabel.BackgroundTransparency = 1
@@ -3374,7 +3967,7 @@ aboutText.TextXAlignment = Enum.TextXAlignment.Left
 aboutText.TextYAlignment = Enum.TextYAlignment.Top
 aboutText.TextColor3 = C.muted
 aboutText.TextWrapped = true
-aboutText.Text = "Sigma Scripts · Sell Lemons module.\nRightControl toggles UI visibility.\nEach toggle runs on Heartbeat until turned off."
+aboutText.Text = "Sigma Scripts · Sell Lemons module.\nRightControl toggles UI visibility.\nInfo → Configs saves toggles & multipliers.\nEach toggle runs on Heartbeat until turned off."
 aboutText.Parent = aboutInner
 
 local teleportCount = 0
@@ -3587,6 +4180,21 @@ end)
 	UI.vPing = vPing
 	UI.vTrees = vTrees
 	UI.vFruits = vFruits
+
+	task.defer(function()
+		if not configStorageReady() then
+			return
+		end
+		local active = getActiveConfigName()
+		if active then
+			local ok = loadConfigNamed(active, applyConfigData)
+			if ok then
+				log("Restored config: " .. active)
+				refreshConfigCurrentLabel()
+				refreshConfigList()
+			end
+		end
+	end)
 
 	RunService.RenderStepped:Connect(function()
 		UI.frames += 1
