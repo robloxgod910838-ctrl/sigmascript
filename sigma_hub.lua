@@ -1,5 +1,5 @@
 -- Sigma Scripts — multi-game hub launcher (bundled, keyless)
-local HUB_VERSION = "2026.06.23d"
+local HUB_VERSION = "2026.06.23e"
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -5013,7 +5013,7 @@ end
 
 getgenv().SigmaScriptsRunning = nil
 ]=],
-	anime_defend = [=[-- Defend ur base with anime — Sigma Scripts game module
+	anime_defend = [=[-- Defend ur base with anime — Sigma Scripts (safe / anti-kick build)
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -5021,20 +5021,20 @@ local Workspace = game:GetService("Workspace")
 local RS = game:GetService("ReplicatedStorage")
 
 local plr = Players.LocalPlayer
-local SIGMA_VERSION = "2026.06.23-anime4"
+local SIGMA_VERSION = "2026.06.23-anime5"
 
-local BUY_DELAY = 0.6
-local PLACE_DELAY = 1
-local WAVE_DELAY = 3
-local BP_MAX_LEVEL = 30
+local WALK_TIMEOUT = 12
+local BUY_DELAY = 1.4
+local PLACE_DELAY = 2.5
+local WAVE_DELAY = 8
+local BP_CLAIM_DELAY = 2
+local LOOP_DELAY = 0.6
 
 local Remotes = RS:WaitForChild("Remotes")
 local CharRemotes = Remotes:WaitForChild("Characters")
 local StartRemotes = Remotes:WaitForChild("Start")
 local AutoRollRemotes = Remotes:WaitForChild("AutoRoll")
-local NPCEvents = Remotes:FindFirstChild("NPCEvents")
 
-local PickupCharacter = CharRemotes:WaitForChild("PickupCharacter")
 local PlaceCharacter = CharRemotes:WaitForChild("PlaceCharacter")
 local StartWave = StartRemotes:WaitForChild("StartWave")
 local BPClaim = RS:WaitForChild("Battlepass"):WaitForChild("Claim")
@@ -5056,17 +5056,13 @@ local State = {
 	autoBuy = false,
 	autoPlace = false,
 	autoWave = false,
-	autoSell = false,
 	autoClaimBP = false,
 	autoClaimQuest = false,
-	autoSpin = false,
-	fastRoll = true,
-	bypassPremium = true,
-	bypassGamepass = false,
-	skipRollAnim = false,
-	tpToRoll = true,
+	walkToRoll = true,
+	walkToBuy = true,
 	running = true,
 	automationBusy = false,
+	serverAutoRollOn = false,
 	lastAction = "Idle",
 	logLines = {},
 	lastRollAt = 0,
@@ -5074,14 +5070,13 @@ local State = {
 	lastPlaceAt = 0,
 	lastWaveAt = 0,
 	lastBPAt = 0,
-	lastSellAt = 0,
-	lastSpinAt = 0,
+	lastBPLevel = 1,
+	lastQuestAt = 0,
 	tick = 0,
 }
 
 local UI = { activeNav = "Home", frames = 0 }
 local heartbeatConn
-local hooksInstalled = false
 
 local function log(msg)
 	table.insert(State.logLines, 1, os.date("%H:%M:%S") .. "  " .. msg)
@@ -5167,6 +5162,14 @@ local function getHRP()
 	return char:FindFirstChild("HumanoidRootPart")
 end
 
+local function getHumanoid()
+	local char = plr.Character
+	if not char then
+		return nil
+	end
+	return char:FindFirstChildOfClass("Humanoid")
+end
+
 local function nearPart(part, maxDist)
 	if not part or not part:IsA("BasePart") then
 		return false
@@ -5178,17 +5181,28 @@ local function nearPart(part, maxDist)
 	return (hrp.Position - part.Position).Magnitude <= (maxDist or 10)
 end
 
-local function tpNear(part, offsetY)
+local function walkToPart(part, maxDist)
 	if not part or not part:IsA("BasePart") then
 		return false
 	end
-	local hrp = getHRP()
-	if not hrp then
+	local range = maxDist or 10
+	if nearPart(part, range) then
+		return true
+	end
+	local hum = getHumanoid()
+	if not hum then
 		return false
 	end
-	local y = offsetY or 3
-	hrp.CFrame = part.CFrame * CFrame.new(0, y, -4)
-	return true
+	hum:MoveTo(part.Position)
+	local t0 = os.clock()
+	while os.clock() - t0 < WALK_TIMEOUT do
+		if nearPart(part, range) then
+			return true
+		end
+		task.wait(0.25)
+		hum:MoveTo(part.Position)
+	end
+	return nearPart(part, range + 2)
 end
 
 local function firePrompt(prompt, hold)
@@ -5204,20 +5218,16 @@ local function firePrompt(prompt, hold)
 	return ok
 end
 
-local function usePrompt(prompt, opts)
+local function usePromptInRange(prompt)
 	if not prompt then
 		return false
 	end
-	opts = opts or {}
 	local part = prompt.Parent
-	if not opts.skipTp and part and part:IsA("BasePart") then
-		local range = prompt.MaxActivationDistance or 8
-		if not nearPart(part, range + 1) then
-			tpNear(part, 2)
-			task.wait(0.08)
-		end
+	local range = prompt.MaxActivationDistance or 8
+	if not part or not part:IsA("BasePart") or not nearPart(part, range + 1) then
+		return false
 	end
-	return firePrompt(prompt)
+	return firePrompt(prompt, prompt.HoldDuration)
 end
 
 local function findPrompt(base, promptName, actionText)
@@ -5238,11 +5248,55 @@ local function findPrompt(base, promptName, actionText)
 	return nil
 end
 
-local function getRollDelay()
-	if State.fastRoll or plr:GetAttribute("FastRoll") == true then
-		return 0.4
+local function parsePrice(text)
+	if type(text) ~= "string" then
+		return math.huge
 	end
-	return 4.2
+	local num = text:match("%$([%d%.]+)([KMBT]?)")
+	if not num then
+		return math.huge
+	end
+	local n = tonumber(num) or math.huge
+	local suffix = text:match("%$[%d%.]+([KMBT])")
+	if suffix == "K" then
+		n *= 1000
+	elseif suffix == "M" then
+		n *= 1000000
+	elseif suffix == "B" then
+		n *= 1000000000
+	elseif suffix == "T" then
+		n *= 1000000000000
+	end
+	return n
+end
+
+local function enableServerAutoRoll()
+	if State.serverAutoRollOn then
+		return true
+	end
+	local ok = pcall(function()
+		AutoRollRemotes.Toggle:FireServer(true)
+		AutoRollRemotes.SetSetting:FireServer("Enabled", true)
+	end)
+	if ok then
+		State.serverAutoRollOn = true
+		log("Game AutoRoll enabled (server)")
+	end
+	local base = getPlayerBase()
+	if not base then
+		return ok
+	end
+	local prompt = findPrompt(base, "AutoRollPrompt")
+	if prompt then
+		if State.walkToRoll and walkToPart(prompt.Parent, prompt.MaxActivationDistance or 10) then
+			usePromptInRange(prompt)
+		elseif usePromptInRange(prompt) then
+			log("AutoRoll prompt fired")
+		else
+			log("Walk to roll machine for AutoRoll")
+		end
+	end
+	return ok
 end
 
 local function rollOnce()
@@ -5252,47 +5306,27 @@ local function rollOnce()
 		return false
 	end
 
-	if State.fastRoll then
-		plr:SetAttribute("FastRoll", true)
-	end
-
-	local ok = false
 	local rollPrompt = findPrompt(base, "RollPrompt")
-	if rollPrompt then
-		if State.tpToRoll then
-			local rollPart = rollPrompt.Parent
-			if rollPart and rollPart:IsA("BasePart") and not nearPart(rollPart, rollPrompt.MaxActivationDistance or 10) then
-				tpNear(rollPart, 2)
-				task.wait(0.05)
-			end
-		end
-		ok = firePrompt(rollPrompt, rollPrompt.HoldDuration) or ok
+	if not rollPrompt then
+		log("RollPrompt not found on plot")
+		return false
 	end
 
-	if not ok then
-		local rollFolder = base:FindFirstChild("Roll")
-		if rollFolder then
-			if State.tpToRoll then
-				local btn = rollFolder:FindFirstChild("RollButton", true)
-				if btn and btn:IsA("BasePart") and not nearPart(btn, 10) then
-					tpNear(btn, 2)
-					task.wait(0.05)
-				end
-			end
-			for _, d in rollFolder:GetDescendants() do
-				if d:IsA("ProximityPrompt") and d.Name == "RollPrompt" then
-					ok = firePrompt(d, d.HoldDuration) or ok
-				end
-			end
+	if State.walkToRoll and not nearPart(rollPrompt.Parent, (rollPrompt.MaxActivationDistance or 10) + 1) then
+		setStatus("Walking to roll...")
+		if not walkToPart(rollPrompt.Parent, rollPrompt.MaxActivationDistance or 10) then
+			log("Too far from roll — walk closer")
+			return false
 		end
 	end
 
+	local ok = usePromptInRange(rollPrompt)
 	State.lastRollAt = os.clock()
 	if ok then
 		setStatus("Roll sent")
 		log("Roll prompt fired")
 	else
-		log("Roll failed — stand at your roll machine")
+		log("Stand next to roll machine (within 10 studs)")
 	end
 	return ok
 end
@@ -5312,22 +5346,18 @@ local function getShopCharacters(base)
 			local hrp = child:FindFirstChild("HumanoidRootPart")
 			local buyPrompt = hrp and hrp:FindFirstChildOfClass("ProximityPrompt")
 			if buyPrompt and buyPrompt.ActionText == "Buy" then
-				table.insert(out, { model = child, prompt = buyPrompt })
+				table.insert(out, {
+					model = child,
+					prompt = buyPrompt,
+					price = parsePrice(buyPrompt.ObjectText),
+				})
 			end
 		end
 	end
+	table.sort(out, function(a, b)
+		return a.price < b.price
+	end)
 	return out
-end
-
-local function buyCharacter(entry)
-	if not entry or not entry.prompt then
-		return false
-	end
-	local ok = usePrompt(entry.prompt, { skipTp = nearPart(entry.prompt.Parent, (entry.prompt.MaxActivationDistance or 8) + 1) })
-	if ok then
-		log("Buy: " .. entry.model.Name)
-	end
-	return ok
 end
 
 local function tryAutoBuy()
@@ -5335,17 +5365,38 @@ local function tryAutoBuy()
 	if now - State.lastBuyAt < BUY_DELAY then
 		return false
 	end
+	local cash = tonumber(getData("Cash", 0)) or 0
 	local chars = getShopCharacters()
 	if #chars == 0 then
 		return false
 	end
-	State.lastBuyAt = now
-	local cash = tonumber(getData("Cash", 0)) or 0
+
+	local target
 	for _, entry in chars do
-		buyCharacter(entry)
-		task.wait(0.12)
+		if entry.price <= cash then
+			target = entry
+			break
+		end
 	end
-	setStatus("Buying units")
+	if not target then
+		return false
+	end
+
+	if State.walkToBuy and not nearPart(target.prompt.Parent, (target.prompt.MaxActivationDistance or 8) + 1) then
+		setStatus("Walking to " .. target.model.Name)
+		if not walkToPart(target.prompt.Parent, target.prompt.MaxActivationDistance or 8) then
+			return false
+		end
+	end
+
+	if not usePromptInRange(target.prompt) then
+		log("Move closer to buy " .. target.model.Name)
+		return false
+	end
+
+	State.lastBuyAt = now
+	setStatus("Buying " .. target.model.Name)
+	log("Buy: " .. target.model.Name .. " (" .. tostring(target.prompt.ObjectText) .. ")")
 	return true
 end
 
@@ -5449,33 +5500,58 @@ local function tryAutoPlace()
 	local gridRoot = base:FindFirstChild("Grid")
 	local levelGrid = gridRoot and gridRoot:FindFirstChild("Level" .. tostring(gridLevel))
 	if not levelGrid then
-		log("Grid missing L" .. tostring(gridLevel))
 		return false
 	end
 	local gridMap = PlacementHelper.BuildGridMap(levelGrid)
-	local placed = false
-	for _, tool in tools do
-		local cellName, cell = findEmptyGridCell(base, gridMap)
-		if not cell then
-			break
-		end
-		local payload = buildPlacePayload(tool, cellName, cell)
-		if payload then
-			local ok = pcall(function()
-				PlaceCharacter:FireServer(payload)
-			end)
-			if ok then
-				placed = true
-				gridMap[cellName] = nil
-				log("Place " .. tool.Name .. " @ " .. cellName)
+	local tool = tools[1]
+	local cellName, cell = findEmptyGridCell(base, gridMap)
+	if not cell then
+		return false
+	end
+	local payload = buildPlacePayload(tool, cellName, cell)
+	if not payload then
+		return false
+	end
+	local ok, err = pcall(function()
+		PlaceCharacter:FireServer(payload)
+	end)
+	if ok then
+		State.lastPlaceAt = now
+		setStatus("Placed " .. tool.Name)
+		log("Place " .. tool.Name .. " @ " .. cellName)
+	else
+		log("Place failed: " .. tostring(err))
+	end
+	return ok
+end
+
+local function clickStartWaveUi()
+	local main = plr.PlayerGui:FindFirstChild("MainUI")
+	if not main then
+		return false
+	end
+	local top = main:FindFirstChild("UITop")
+	local startFrame = top and top:FindFirstChild("Start")
+	local btn = startFrame and startFrame:FindFirstChild("Start")
+	if not btn or not (btn:IsA("TextButton") or btn:IsA("ImageButton")) then
+		return false
+	end
+	if getconnections then
+		for _, sig in ipairs({ "MouseButton1Click", "Activated" }) do
+			local ev = btn[sig]
+			if ev then
+				for _, conn in getconnections(ev) do
+					if conn.Function then
+						local ok = pcall(conn.Function)
+						if ok then
+							return true
+						end
+					end
+				end
 			end
 		end
 	end
-	if placed then
-		State.lastPlaceAt = now
-		setStatus("Placed units")
-	end
-	return placed
+	return false
 end
 
 local function tryStartWave()
@@ -5488,109 +5564,73 @@ local function tryStartWave()
 		return false
 	end
 	State.lastWaveAt = now
-	task.spawn(function()
-		pcall(function()
-			StartWave:FireServer()
-		end)
-	end)
-	setStatus("StartWave sent")
-	log("StartWave fired")
-	return true
-end
-
-local function claimBattlepass()
-	for level = 1, BP_MAX_LEVEL do
-		pcall(function()
-			BPClaim:FireServer(level, false)
-		end)
-		if State.bypassPremium then
-			pcall(function()
-				BPClaim:FireServer(level, true)
-				BPClaim:FireServer(level, "Premium")
-			end)
-		end
+	if clickStartWaveUi() then
+		setStatus("Start wave (UI)")
+		log("Start wave button clicked")
+		return true
 	end
-	log("BP claim L1-" .. BP_MAX_LEVEL)
-	State.lastBPAt = os.clock()
-	return true
+	local ok = pcall(function()
+		StartWave:FireServer()
+	end)
+	if ok then
+		setStatus("StartWave remote")
+		log("StartWave fired (fallback)")
+	end
+	return ok
 end
 
-local function claimQuests()
-	if BPGetQuest and BPGetQuest:IsA("RemoteFunction") then
-		local ok, data = pcall(function()
-			return BPGetQuest:InvokeServer()
-		end)
-		if ok and type(data) == "table" then
-			for id, quest in pairs(data) do
-				if type(quest) == "table" then
-					local req = quest.Requirement or quest.Target or 999999
-					local prog = quest.Progress or 0
-					if quest.Completed or prog >= req then
-						pcall(function()
-							BPClaimQuest:FireServer(quest.ID or id)
-						end)
-					end
+local function claimOneBattlepassLevel()
+	local level = State.lastBPLevel
+	if level > 30 then
+		State.lastBPLevel = 1
+		return false
+	end
+	local ok = pcall(function()
+		BPClaim:FireServer(level, false)
+	end)
+	if ok then
+		log("BP claim L" .. level)
+		State.lastBPLevel = level + 1
+	end
+	State.lastBPAt = os.clock()
+	return ok
+end
+
+local function claimQuestsSafe()
+	local now = os.clock()
+	if now - State.lastQuestAt < 15 then
+		return false
+	end
+	State.lastQuestAt = now
+	if not (BPGetQuest and BPGetQuest:IsA("RemoteFunction")) then
+		return false
+	end
+	local ok, data = pcall(function()
+		return BPGetQuest:InvokeServer()
+	end)
+	if not ok or type(data) ~= "table" then
+		return false
+	end
+	local claimed = 0
+	for id, quest in pairs(data) do
+		if type(quest) == "table" then
+			local req = quest.Requirement or quest.Target or 999999
+			local prog = quest.Progress or 0
+			if quest.Completed or prog >= req then
+				pcall(function()
+					BPClaimQuest:FireServer(quest.ID or id)
+				end)
+				claimed += 1
+				if claimed >= 3 then
+					break
 				end
 			end
-			log("Quest claim done")
-			return
 		end
 	end
-	pcall(function()
-		BPClaimQuest:FireServer()
-	end)
-	log("Quest claim fired")
-end
-
-local function trySellDuplicates()
-	if not NPCEvents then
-		return false
+	if claimed > 0 then
+		log("Claimed " .. claimed .. " quest(s)")
 	end
-	local sell = NPCEvents:FindFirstChild("SellCharacters")
-	if not sell then
-		return false
-	end
-	pcall(function()
-		sell:FireServer()
-	end)
-	log("SellCharacters fired")
-	State.lastSellAt = os.clock()
-	setStatus("Sell sent")
-	return true
-end
-
-local function enableAutoRollServer()
-	pcall(function()
-		AutoRollRemotes.Toggle:FireServer(true)
-		AutoRollRemotes.SetSetting:FireServer("Enabled", true)
-	end)
-	local base = getPlayerBase()
-	if not base then
-		return
-	end
-	local prompt = findPrompt(base, "AutoRollPrompt")
-	if prompt then
-		usePrompt(prompt)
-		log("AutoRoll enabled")
-	end
-end
-
-local function installBypassHooks()
-	if hooksInstalled or not State.bypassGamepass then
-		return
-	end
-	if not (hookmetamethod and getnamecallmethod) then
-		return
-	end
-	hooksInstalled = true
-	local old = hookmetamethod(game, "__namecall", function(self, ...)
-		local method = getnamecallmethod()
-		if method == "InvokeServer" and self.Name == "RequestGamepass" then
-			return true
-		end
-		return old(self, ...)
-	end)
-	log("Gamepass hook on")
+	return claimed > 0
 end
 
 local function readStats()
@@ -5611,8 +5651,7 @@ local function onHeartbeat()
 		return
 	end
 	State.tick += 1
-
-	if State.tick % 15 == 0 then
+	if State.tick % 20 == 0 then
 		local s = readStats()
 		if UI.vCash then UI.vCash.Text = s.cash end
 		if UI.vRolls then UI.vRolls.Text = s.rolls end
@@ -5624,11 +5663,8 @@ local function onHeartbeat()
 end
 
 local function runAutomation()
-	local now = os.clock()
-
-	if State.autoRoll and now - State.lastRollAt >= getRollDelay() then
-		State.lastRollAt = now
-		rollOnce()
+	if State.autoRoll then
+		enableServerAutoRoll()
 	end
 	if State.autoBuy then
 		tryAutoBuy()
@@ -5639,14 +5675,11 @@ local function runAutomation()
 	if State.autoWave then
 		tryStartWave()
 	end
-	if State.autoClaimBP and now - State.lastBPAt >= 10 then
-		claimBattlepass()
+	if State.autoClaimBP and os.clock() - State.lastBPAt >= BP_CLAIM_DELAY then
+		claimOneBattlepassLevel()
 	end
-	if State.autoClaimQuest and State.tick % 180 == 0 then
-		claimQuests()
-	end
-	if State.autoSell and now - State.lastSellAt >= 6 then
-		trySellDuplicates()
+	if State.autoClaimQuest then
+		claimQuestsSafe()
 	end
 end
 
@@ -5661,12 +5694,11 @@ local function startAutomationLoop()
 				end
 				State.automationBusy = false
 			end
-			task.wait(0.35)
+			task.wait(LOOP_DELAY)
 		end
 	end)
 end
 
--- UI (compact)
 local function buildUI()
 	local C = {
 		bg = Color3.fromRGB(10, 8, 18),
@@ -5700,7 +5732,9 @@ local function buildUI()
 
 	for _, name in ipairs({ "AnimeDefend", "SigmaAnime" }) do
 		local old = plr.PlayerGui:FindFirstChild(name)
-		if old then old:Destroy() end
+		if old then
+			old:Destroy()
+		end
 	end
 
 	getgenv().SigmaStopRequested = false
@@ -5751,7 +5785,7 @@ local function buildUI()
 	ver.TextSize = 10
 	ver.TextXAlignment = Enum.TextXAlignment.Left
 	ver.TextColor3 = C.muted
-	ver.Text = SIGMA_VERSION
+	ver.Text = SIGMA_VERSION .. " safe"
 	ver.Parent = header
 
 	local function hdrBtn(text, color, xOff, fn)
@@ -5774,7 +5808,9 @@ local function buildUI()
 	end)
 	hdrBtn("×", C.red, -32, function()
 		State.running = false
-		if heartbeatConn then heartbeatConn:Disconnect() end
+		if heartbeatConn then
+			heartbeatConn:Disconnect()
+		end
 		gui:Destroy()
 	end)
 
@@ -5862,7 +5898,9 @@ local function buildUI()
 		btn.Parent = sidebar
 		corner(btn, 8)
 		navItems[pageName] = btn
-		btn.MouseButton1Click:Connect(function() selectNav(pageName) end)
+		btn.MouseButton1Click:Connect(function()
+			selectNav(pageName)
+		end)
 	end
 
 	makeNav("Home", "Home")
@@ -5941,6 +5979,19 @@ local function buildUI()
 	UI.vUnits = statRow(statsInner, "Units", C.text)
 	UI.vBase = statRow(statsInner, "Plot", C.muted)
 
+	local warnInner = sectionCard(homePage, "Important")
+	local warn = Instance.new("TextLabel")
+	warn.BackgroundTransparency = 1
+	warn.Size = UDim2.new(1, 0, 0, 0)
+	warn.AutomaticSize = Enum.AutomaticSize.Y
+	warn.Font = Enum.Font.Gotham
+	warn.TextSize = 11
+	warn.TextXAlignment = Enum.TextXAlignment.Left
+	warn.TextColor3 = C.yellow
+	warn.TextWrapped = true
+	warn.Text = "Safe mode: no teleport, no FastRoll hack, no premium bypass. Enable ONE toggle at a time. Rejoin if you were kicked before."
+	warn.Parent = warnInner
+
 	local logInner = sectionCard(homePage, "Activity log")
 	UI.logLabel = Instance.new("TextLabel")
 	UI.logLabel.BackgroundTransparency = 1
@@ -6002,11 +6053,8 @@ local function buildUI()
 		end
 		toggle.MouseButton1Click:Connect(function()
 			State[key] = not State[key]
-			if key == "fastRoll" and State[key] then
-				plr:SetAttribute("FastRoll", true)
-			end
-			if key == "bypassGamepass" then
-				installBypassHooks()
+			if key == "autoRoll" and not State[key] then
+				State.serverAutoRollOn = false
 			end
 			refresh()
 			log(label .. " → " .. (State[key] and "ON" or "OFF"))
@@ -6027,18 +6075,17 @@ local function buildUI()
 		end
 	end
 
-	local farmInner = sectionCard(farmPage, "Automation")
-	makeToggle(farmInner, "Auto Roll", "TP to roll machine + fire RollPrompt", "autoRoll")
-	makeToggle(farmInner, "Auto Buy", "Fire Buy prompts on rolled units", "autoBuy")
-	makeToggle(farmInner, "Auto Place", "Place tools on grid (server payload)", "autoPlace")
-	makeToggle(farmInner, "Auto Wave", "Fire StartWave remote", "autoWave")
-	makeToggle(farmInner, "TP To Roll", "Teleport to roll before rolling", "tpToRoll")
-	makeToggle(farmInner, "Fast Roll", "Set FastRoll attribute (0.4s delay)", "fastRoll")
+	local farmInner = sectionCard(farmPage, "Automation (safe)")
+	makeToggle(farmInner, "Auto Roll", "Uses game AutoRoll + walks to machine", "autoRoll")
+	makeToggle(farmInner, "Auto Buy", "Walks to cheapest unit & buys one", "autoBuy")
+	makeToggle(farmInner, "Auto Place", "One unit per tick when you have tools", "autoPlace")
+	makeToggle(farmInner, "Auto Wave", "Clicks Start UI button", "autoWave")
+	makeToggle(farmInner, "Walk To Roll", "Walk instead of teleport", "walkToRoll")
+	makeToggle(farmInner, "Walk To Buy", "Walk to shop units on plot", "walkToBuy")
 
 	local bpInner = sectionCard(bpPage, "Battle pass")
-	makeToggle(bpInner, "Auto Claim BP", "Claim levels 1-30", "autoClaimBP")
-	makeToggle(bpInner, "Premium Bypass", "Also try premium claims", "bypassPremium")
-	makeToggle(bpInner, "Auto Claim Quests", "Claim finished quests", "autoClaimQuest")
+	makeToggle(bpInner, "Auto Claim BP", "One level every 2s (free only)", "autoClaimBP")
+	makeToggle(bpInner, "Auto Claim Quests", "Up to 3 finished quests / cycle", "autoClaimQuest")
 
 	local btnInner = sectionCard(farmPage, "Manual")
 	local function actionBtn(parent, text, fn)
@@ -6053,10 +6100,10 @@ local function buildUI()
 		corner(b, 8)
 		b.MouseButton1Click:Connect(fn)
 	end
-	actionBtn(btnInner, "Roll once", rollOnce)
-	actionBtn(btnInner, "Enable game AutoRoll", enableAutoRollServer)
+	actionBtn(btnInner, "Roll once (walk + prompt)", rollOnce)
+	actionBtn(btnInner, "Enable game AutoRoll", enableServerAutoRoll)
 	actionBtn(btnInner, "Start wave", tryStartWave)
-	actionBtn(btnInner, "Claim battle pass", claimBattlepass)
+	actionBtn(btnInner, "Claim next BP level", claimOneBattlepassLevel)
 
 	selectNav("Home")
 
@@ -6088,7 +6135,9 @@ local function buildUI()
 	end)
 
 	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed then return end
+		if processed then
+			return
+		end
 		if input.KeyCode == Enum.KeyCode.RightControl then
 			gui.Enabled = not gui.Enabled
 		end
@@ -6096,23 +6145,20 @@ local function buildUI()
 
 	task.defer(function()
 		initDataClient()
-		if State.fastRoll then
-			plr:SetAttribute("FastRoll", true)
-		end
 		local s = readStats()
 		if s.base == "No plot" then
-			log("WARNING: No plot owned — claim a base in-game")
+			log("WARNING: No plot — claim a base in-game first")
 		else
-			log("Plot: " .. s.base)
+			log("Plot: " .. s.base .. " | $" .. s.cash)
 		end
-		setStatus("Ready")
+		setStatus("Ready — enable one feature")
 	end)
 end
 
 buildUI()
 startAutomationLoop()
 
-heartbeatConn = RunService.Heartbeat:Connect(function())
+heartbeatConn = RunService.Heartbeat:Connect(function()
 	UI.frames += 1
 	onHeartbeat()
 end)
