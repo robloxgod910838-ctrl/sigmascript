@@ -5084,30 +5084,6 @@ end
 
 getgenv().SigmaStopRequested = false
 
--- Default: show the Sigma Hub picker. Set getgenv().SigmaAutoLaunch = true to skip straight into
--- the matching game when you're already on its PlaceId (handy for autoexec).
-if getgenv().SigmaAutoLaunch == true and getgenv().SigmaShowHub ~= true then
-	for _, entry in GAMES do
-		if gameWorksHere(entry) then
-			getgenv().SigmaScriptsRunning = true
-			task.spawn(function()
-				local ok, fnOrErr = pcall(loadGameModule, entry)
-				if ok then
-					local runOk, runErr = pcall(fnOrErr)
-					if not runOk then
-						warn("[Sigma Scripts] " .. entry.name .. " error: " .. tostring(runErr))
-						getgenv().SigmaScriptsRunning = nil
-					end
-				else
-					warn("[Sigma Scripts] load failed: " .. tostring(fnOrErr))
-					getgenv().SigmaScriptsRunning = nil
-				end
-			end)
-			return
-		end
-	end
-end
-
 getgenv().SigmaScriptsRunning = true
 
 local function decodeBase64(data)
